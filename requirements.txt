@@ -1,1 +1,3 @@
-
+gradio==6.26.0
+pandas>=2.0.0
+yfinance>=0.2.40
