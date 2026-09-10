@@ -2,7 +2,6 @@ import os
 import sys
 import time
 from difflib import SequenceMatcher
-from functools import partial
  
 import pandas as pd
 from pathlib import Path
@@ -13,6 +12,8 @@ try:
     import yfinance as yf
 except ImportError:
     sys.exit("yfinance is not installed. Run: pip install yfinance --upgrade")
+ 
+from huggingface_hub import InferenceClient
  
  
 DATA_DIR = Path(__file__).parent / "data"
@@ -36,12 +37,16 @@ LIVE_FETCH_DELAY = 0.2  # polite to yfinance
  
 FUND_QUOTE_TYPES = {"ETF", "MUTUALFUND", "INDEX"}
  
-# ------------------------------ LLM CONFIG ----------------------------------
+# ---------------------------------------------------------------------------
+# LLM CONFIG
+# One model runs locally on the Space's own compute (transformers pipeline),
+# the other is called remotely through the Hugging Face Inference API.
+# ---------------------------------------------------------------------------
 LOCAL_MODEL = "Qwen/Qwen3-0.6B"
-REMOTE_MODEL = "claude-sonnet-5"  # Anthropic model string; see docs.claude.com for current options
+REMOTE_MODEL = "openai/gpt-oss-20b"
  
-LLM_LOCAL_CHOICE = f"Local (on-device, {LOCAL_MODEL})"
-LLM_REMOTE_CHOICE = f"Remote (Anthropic API, {REMOTE_MODEL})"
+_local_pipe = None  # lazy-loaded on first use so app startup stays fast
+ 
  
 ALIAS_MAP = {
     "google": ["GOOGL", "GOOG"], "alphabet": ["GOOGL", "GOOG"],
@@ -244,7 +249,7 @@ def resolve_pick(universe: pd.DataFrame, query: str) -> tuple:
         return q_upper, "not found in local listings — trying as a raw ticker"
  
     chosen = matches.iloc[0]
-    note = "" if len(matches) == 1 else "multiple matches — auto-picked best match"
+    note = "" if len(matches) == 1 else f"multiple matches — auto-picked best match"
     return chosen["symbol_clean"], note
  
  
@@ -460,23 +465,20 @@ def enrich_with_live_info(suggestions):
  
 def build_suggestions(universe, picks_info, exclude_symbols, group_key,
                        broad_funds=False, use_beta_filter=False):
-    """group_key may be None, in which case grouping is skipped entirely and
-    candidates are pulled from the generic (whole-universe) pool — this is
-    what powers the plain 'Beta' strategy."""
     filled = set(exclude_symbols)
     target_beta = None
  
     if use_beta_filter:
         target_betas = [p["beta"] if p.get("beta") is not None else NEUTRAL_BETA for p in picks_info]
-        target_beta = sum(target_betas) / len(target_betas) if target_betas else NEUTRAL_BETA
+        target_beta = sum(target_betas) / len(target_betas)
  
-    if group_key is None:
-        company_groups = []
-    else:
-        company_groups = [
-            p[group_key] for p in picks_info
-            if p.get(group_key) and not str(p[group_key]).startswith("Fund: ") and p.get(group_key) != "Fund/ETF"
-        ]
+    # group_key can be None -> "pure" mode with no sector/industry grouping,
+    # candidates are ranked across the whole universe instead.
+    company_groups = [
+        p[group_key] for p in picks_info
+        if group_key and p.get(group_key)
+        and not str(p[group_key]).startswith("Fund: ") and p.get(group_key) != "Fund/ETF"
+    ]
  
     companies = []
     if company_groups:
@@ -524,10 +526,9 @@ def build_suggestions(universe, picks_info, exclude_symbols, group_key,
     return combined[:NUM_SUGGESTIONS]
  
  
-# The five suggestion strategies. group_key=None means "ignore sector/industry
-# grouping and rank the whole universe purely by beta closeness".
+# (group_key, broad_funds, use_beta_filter)
 MODE_LABELS = {
-    "Beta (closest risk level)": (None, True, True),
+    "Beta (closest risk level)": (None, False, True),
     "Sector (overall)": ("sector", True, False),
     "Sector (overall + by beta)": ("sector", True, True),
     "Industry": ("industry", False, False),
@@ -575,206 +576,191 @@ def suggestions_to_df(suggestions) -> pd.DataFrame:
     return pd.DataFrame(rows)
  
  
-# ------------------------------ LLM EVALUATION -------------------------------
-# Two backends for the same evaluation task:
-#   - Local:  runs entirely on this host's compute via a transformers pipeline.
-#   - Remote: calls a hosted model through the Hugging Face Inference API.
+# ---------------------------------------------------------------------------
+# LLM EVALUATION (deliverable 1: remote HF API call / deliverable 2: local model)
+# ---------------------------------------------------------------------------
  
-_local_pipe = None
+def _format_symbol_list(items):
+    lines = []
+    for it in items:
+        beta = it.get("beta")
+        beta_str = f"{beta:.2f}" if beta is not None else "N/A"
+        kind = it.get("type", "Company")
+        sector = it.get("sector") or "N/A"
+        industry = it.get("industry_used") or it.get("industry") or "N/A"
+        lines.append(
+            f"- {it.get('symbol', '?')} ({it.get('name', '?')}) | {kind} | "
+            f"sector={sector} | industry={industry} | beta={beta_str}"
+        )
+    return "\n".join(lines) if lines else "(none)"
  
  
-def _get_local_pipeline():
-    """Lazily load (and cache) the local text-generation pipeline."""
+def build_evaluation_prompt(picks_info, all_suggestions, mode_choice) -> str:
+    picks_block = _format_symbol_list(picks_info)
+    suggestions_block = _format_symbol_list(all_suggestions)
+    return (
+        "You are a cautious financial-education assistant, not a licensed financial "
+        "advisor. Do not give definitive buy/sell instructions.\n\n"
+        "A user picked the following stocks/funds:\n"
+        f"{picks_block}\n\n"
+        f"Using the '{mode_choice}' matching mode, the app suggested these additional "
+        f"stocks/funds:\n{suggestions_block}\n\n"
+        "In 4-6 short bullet points, evaluate the suggestions as potential additions to "
+        "a long-term investment portfolio. Comment on diversification, sector/industry "
+        "concentration, and relative risk (beta) versus the original picks. Call out which "
+        "suggestions look strongest and which look weakest, and why. End with one sentence "
+        "reminding the user this is general educational information, not financial advice."
+    )
+ 
+ 
+def get_local_pipeline():
+    """Lazily load the local transformers pipeline the first time it's used."""
     global _local_pipe
     if _local_pipe is None:
-        try:
-            import torch
-            from transformers import pipeline
-        except ImportError as exc:
-            raise RuntimeError(
-                "transformers/torch are not installed. "
-                "Run: pip install transformers torch --upgrade"
-            ) from exc
- 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        from transformers import pipeline
+        import torch
         _local_pipe = pipeline(
             "text-generation",
             model=LOCAL_MODEL,
             dtype="auto",
-            device=device,
+            device="cuda" if torch.cuda.is_available() else "cpu",
         )
     return _local_pipe
  
  
-def build_evaluation_prompt(picks_info, all_suggestions) -> str:
-    lines = [
-        "You are a cautious financial-literacy assistant. You are NOT a licensed "
-        "financial advisor and must not give definitive buy/sell instructions.",
-        "",
-        "A user picked the following stocks/funds:",
-    ]
-    for p in picks_info:
-        lines.append(
-            f"- {p.get('symbol')} ({p.get('name')}): sector={p.get('sector')}, "
-            f"industry={p.get('industry')}, beta={p.get('beta')}"
-        )
- 
-    lines.append("")
-    lines.append("Based on those picks, the app suggested adding:")
-    for s in all_suggestions:
-        industry = s.get("industry_used") or s.get("industry")
-        lines.append(
-            f"- {s.get('symbol')} ({s.get('name')}, {s.get('type', 'Company')}): "
-            f"sector={s.get('sector')}, industry={industry}, beta={s.get('beta')}"
-        )
- 
-    lines.append("")
-    lines.append(
-        "For each suggested pick, briefly explain whether it looks like a reasonable "
-        "addition to a diversified portfolio alongside the user's original picks, and "
-        "why (consider diversification, sector concentration, and risk/beta). Note any "
-        "concerns such as overlap or concentration risk. End with a short, general "
-        "disclaimer that this is educational, not financial advice."
-    )
-    return "\n".join(lines)
- 
- 
-@spaces.GPU
-def _run_local_llm(prompt: str) -> str:
-    pipe = _get_local_pipeline()
+@spaces.GPU(duration=60)
+def evaluate_locally(prompt: str) -> str:
+    """Run the evaluation on the Space's own (ZeroGPU) compute — no remote API call."""
+    pipe = get_local_pipeline()
     messages = [{"role": "user", "content": prompt}]
-    output = pipe(messages, max_new_tokens=600, do_sample=True, temperature=0.7)
+    output = pipe(messages, max_new_tokens=500, do_sample=True, temperature=0.7)
     generated = output[0]["generated_text"]
-    if isinstance(generated, list):
-        # Chat-style pipelines return the full message history; grab the last turn.
-        return str(generated[-1].get("content", "")).strip()
+    if isinstance(generated, list) and generated:
+        return generated[-1].get("content", "").strip()
     return str(generated).strip()
  
  
-def _run_remote_llm(prompt: str) -> str:
-    """Calls Claude via the Anthropic API. Requires an ANTHROPIC_API_KEY secret
-    on the Space (or in the local environment)."""
-    try:
-        import anthropic
-    except ImportError as exc:
-        raise RuntimeError(
-            "anthropic is not installed. Run: pip install anthropic --upgrade"
-        ) from exc
- 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. Add it as a secret on this Space "
-            "(Settings -> Repository secrets) or export it locally."
-        )
- 
-    client = anthropic.Anthropic(api_key=api_key)
-    message = client.messages.create(
-        model=REMOTE_MODEL,
-        max_tokens=600,
-        temperature=0.7,
+def evaluate_remotely(prompt: str) -> str:
+    """Call a hosted LLM through the Hugging Face Inference API."""
+    token = os.environ.get("HF_TOKEN")
+    client = InferenceClient(model=REMOTE_MODEL, token=token)
+    completion = client.chat_completion(
         messages=[{"role": "user", "content": prompt}],
+        max_tokens=500,
+        temperature=0.7,
     )
-    return message.content[0].text.strip()
+    return completion.choices[0].message.content.strip()
  
  
-def evaluate_with_llm(llm_choice, state):
-    """Evaluates every pick + suggestion seen so far, then ends the suggestion loop."""
-    state = state or {}
+def run_evaluation(state, backend_choice):
     picks_info = state.get("picks_info", [])
     all_suggestions = state.get("all_suggestions", [])
- 
-    enabled = gr.update(interactive=True)
-    disabled = gr.update(interactive=False)
+    mode_choice = state.get("mode", "")
  
     if not picks_info or not all_suggestions:
-        msg = "Get at least one round of suggestions before requesting an LLM evaluation."
-        return (msg, state, enabled, enabled, enabled, enabled, enabled, enabled)
+        return "Get some suggestions first, then evaluate them.", gr.update(), gr.update(), gr.update()
  
-    prompt = build_evaluation_prompt(picks_info, all_suggestions)
+    prompt = build_evaluation_prompt(picks_info, all_suggestions, mode_choice)
  
     try:
-        if llm_choice == LLM_LOCAL_CHOICE:
-            evaluation = _run_local_llm(prompt)
-            source_note = f"_Evaluated locally on this host with `{LOCAL_MODEL}`._"
+        if backend_choice.startswith("Local"):
+            evaluation = evaluate_locally(prompt)
         else:
-            evaluation = _run_remote_llm(prompt)
-            source_note = f"_Evaluated via the Anthropic API with `{REMOTE_MODEL}`._"
-    except Exception as exc:
-        return (f"⚠️ LLM evaluation failed: {exc}", state, enabled, enabled, enabled, enabled, enabled, enabled)
+            evaluation = evaluate_remotely(prompt)
+        evaluation = f"**Model used:** {backend_choice}\n\n{evaluation}"
+    except Exception as e:
+        evaluation = (
+            f"⚠️ Evaluation failed using {backend_choice}: {e}\n\n"
+            "If you picked the Hugging Face API option, make sure this Space has an "
+            "`HF_TOKEN` secret configured with Inference Providers access. If you picked "
+            "Local, make sure `transformers`/`torch` are installed and there's enough "
+            "memory/GPU available."
+        )
  
-    state["evaluation_done"] = True
-    result_md = f"### 🤖 Portfolio Evaluation\n\n{evaluation}\n\n{source_note}"
-    # Ends the loop: disable every suggestion-strategy button and the evaluate button.
-    return (result_md, state, disabled, disabled, disabled, disabled, disabled, disabled)
+    # Evaluation ends the suggestion loop: lock further "show more" / re-evaluation.
+    return (
+        evaluation,
+        gr.update(interactive=False),  # more_button
+        gr.update(interactive=False),  # eval_button
+        gr.update(interactive=False),  # eval_backend
+    )
  
  
-# ------------------------------ SUGGESTION LOOP -------------------------------
+# GRADIO CALLBACKS -----------------------------
  
-def handle_suggestion_round(mode_name, picks_text, state, current_picks_df, current_suggestions_df):
-    """Shared handler for all five strategy buttons.
+def run_search(picks_text, mode_choice, progress=gr.Progress()):
+    if not picks_text or not picks_text.strip():
+        empty = pd.DataFrame()
+        state = {"picks_info": [], "exclude": [], "mode": mode_choice, "all_suggestions": []}
+        return (
+            empty, empty, state, DATA_LOAD_WARNING,
+            gr.update(visible=False),                       # eval_backend
+            gr.update(visible=False, interactive=True),      # eval_button
+            gr.update(interactive=True),                     # more_button
+            "",                                              # eval_output
+        )
  
-    First click (no picks resolved yet): parses picks_text and returns the
-    first 5 suggestions for the clicked strategy.
-    Every click after that: treated as a rotation — 5 more suggestions using
-    whichever strategy button was just clicked, appended to what's shown.
-    """
-    state = state or {}
+    if picks_text.strip().lower() == "default":
+        queries = DEFAULT_PICKS + [DEFAULT_BENCHMARK]
+    else:
+        queries = [q.strip() for q in picks_text.split(",") if q.strip()][:5]
  
-    if not state.get("picks_info"):
-        # ---- First round ----
-        if not picks_text or not picks_text.strip():
-            empty = pd.DataFrame()
-            return (
-                empty, empty,
-                {"picks_info": [], "exclude": [], "mode": mode_name, "all_suggestions": []},
-                "Enter at least one ticker, name, or 'default' first.",
-            )
+    progress(0, desc="Resolving picks...")
+    picks_info = []
+    for i, q in enumerate(queries):
+        symbol, note = resolve_pick(UNIVERSE, q)
+        if symbol is None:
+            continue
+        info = fetch_live_info(symbol)
+        info["_note"] = note
+        picks_info.append(info)
+        time.sleep(LIVE_FETCH_DELAY)
+        progress((i + 1) / (len(queries) + 1), desc=f"Fetched {symbol}")
  
-        if picks_text.strip().lower() == "default":
-            queries = DEFAULT_PICKS + [DEFAULT_BENCHMARK]
-        else:
-            queries = [q.strip() for q in picks_text.split(",") if q.strip()][:5]
+    exclude = {p["symbol"].upper() for p in picks_info}
  
-        picks_info = []
-        for q in queries:
-            symbol, note = resolve_pick(UNIVERSE, q)
-            if symbol is None:
-                continue
-            info = fetch_live_info(symbol)
-            info["_note"] = note
-            picks_info.append(info)
-            time.sleep(LIVE_FETCH_DELAY)
+    progress(0.6, desc="Finding suggestions...")
+    suggestions = generate_suggestions(mode_choice, picks_info, exclude)
+    exclude.update(s["symbol"].upper() for s in suggestions if s.get("symbol"))
  
-        exclude = {p["symbol"].upper() for p in picks_info}
-        suggestions = generate_suggestions(mode_name, picks_info, exclude)
-        exclude.update(s["symbol"].upper() for s in suggestions if s.get("symbol"))
+    state = {
+        "picks_info": picks_info,
+        "exclude": list(exclude),
+        "mode": mode_choice,
+        "all_suggestions": list(suggestions),
+    }
+    warning = DATA_LOAD_WARNING if UNIVERSE.empty else ""
+    has_suggestions = bool(suggestions)
+    return (
+        picks_info_to_df(picks_info), suggestions_to_df(suggestions), state, warning,
+        gr.update(visible=has_suggestions),                     # eval_backend
+        gr.update(visible=has_suggestions, interactive=True),   # eval_button
+        gr.update(interactive=True),                            # more_button
+        "",                                                     # eval_output
+    )
  
-        state = {
-            "picks_info": picks_info,
-            "exclude": list(exclude),
-            "mode": mode_name,
-            "all_suggestions": suggestions,
-        }
-        warning = DATA_LOAD_WARNING if UNIVERSE.empty else ""
-        return picks_info_to_df(picks_info), suggestions_to_df(suggestions), state, warning
  
-    # ---- Rotation round ----
+def run_more(state, mode_choice, current_suggestions_df):
+    """Fetch another 5 suggestions. Reads the mode radio fresh each click, so the
+    matching criteria can be changed on every rotation."""
     picks_info = state.get("picks_info", [])
     exclude = set(state.get("exclude", []))
  
-    more = generate_suggestions(mode_name, picks_info, exclude)
+    if not picks_info:
+        return current_suggestions_df, state
+ 
+    more = generate_suggestions(mode_choice, picks_info, exclude)
     if not more:
-        return current_picks_df, current_suggestions_df, state, "No more unique suggestions available."
+        return current_suggestions_df, state
  
     exclude.update(s["symbol"].upper() for s in more if s.get("symbol"))
     state["exclude"] = list(exclude)
-    state["mode"] = mode_name
-    state["all_suggestions"] = state.get("all_suggestions", []) + more
+    state["mode"] = mode_choice  # remember most recent mode for the AI evaluation prompt
+    state["all_suggestions"] = state.get("all_suggestions", []) + list(more)
  
     new_df = suggestions_to_df(more)
     combined = pd.concat([current_suggestions_df, new_df], ignore_index=True)
-    return current_picks_df, combined, state, f"Added 5 more using **{mode_name}**."
+    return combined, state
  
  
 # UI LAYOUT ---------------------
@@ -784,27 +770,26 @@ with gr.Blocks(title="Stock Suggestor") as demo:
         "# 📈 Stock Suggestor\n"
         "Enter up to 5 stocks/funds — tickers, company names, or common nicknames "
         "(e.g. `AAPL, google, tesla, SPY`) — or type **default** for a starter set "
-        "(Apple, Google, Nvidia, Tesla + S&P 500).\n\n"
-        "Pick a strategy below to get 5 suggestions. Click any strategy button again "
-        "for another round of 5 (already-shown picks are excluded), or hand everything "
-        "to an LLM for a plain-English evaluation — that ends the suggestion loop."
+        "(Apple, Google, Nvidia, Tesla + S&P 500). Pick a matching mode below — you "
+        "can change it before each new batch of suggestions."
     )
     if DATA_LOAD_WARNING:
         gr.Markdown(f"⚠️ {DATA_LOAD_WARNING}")
  
-    picks_input = gr.Textbox(
-        label="Your picks (comma-separated)",
-        placeholder="AAPL, google, tesla, SPY, default...",
-    )
- 
-    gr.Markdown("### Suggest by")
     with gr.Row():
-        beta_btn = gr.Button("Beta")
-        sector_btn = gr.Button("Sector (overall)")
-        sector_beta_btn = gr.Button("Sector (overall + by beta)")
-        industry_btn = gr.Button("Industry")
-        industry_beta_btn = gr.Button("Industry (+ by beta)")
+        picks_input = gr.Textbox(
+            label="Your picks (comma-separated)",
+            placeholder="AAPL, google, tesla, SPY, default...",
+            scale=3,
+        )
+        mode_input = gr.Radio(
+            choices=list(MODE_LABELS.keys()),
+            value="Industry",
+            label="Suggest by",
+            scale=2,
+        )
  
+    search_button = gr.Button("Get Suggestions", variant="primary")
     status = gr.Markdown()
  
     gr.Markdown("### Your Picks")
@@ -814,46 +799,42 @@ with gr.Blocks(title="Stock Suggestor") as demo:
         wrap=True,
     )
  
-    gr.Markdown("### Suggestions (click any strategy button again for 5 more)")
+    gr.Markdown("### Suggestions (scroll for more)")
     suggestions_table = gr.Dataframe(
         headers=["Symbol", "Name", "Type", "Sector", "Industry", "Beta"],
         max_height=420,  # scrollable results panel
         wrap=True,
     )
  
-    gr.Markdown("### Done picking? Ask an LLM to evaluate everything so far")
-    llm_choice = gr.Radio(
-        choices=[LLM_LOCAL_CHOICE, LLM_REMOTE_CHOICE],
-        value=LLM_LOCAL_CHOICE,
-        label="Run the evaluation model",
+    more_button = gr.Button("Show 5 More Suggestions")
+ 
+    gr.Markdown("### AI Portfolio Evaluation")
+    eval_backend = gr.Radio(
+        choices=[f"Local ({LOCAL_MODEL})", f"Hugging Face API ({REMOTE_MODEL})"],
+        value=f"Local ({LOCAL_MODEL})",
+        label="Run evaluation using",
+        visible=False,
     )
-    evaluate_btn = gr.Button("🤖 Evaluate picks with LLM (ends suggestions)", variant="stop")
-    evaluation_output = gr.Markdown()
+    eval_button = gr.Button("🤖 Evaluate picks with AI (ends suggestion loop)", visible=False)
+    eval_output = gr.Markdown()
  
     session_state = gr.State({})
  
-    mode_buttons = {
-        "Beta (closest risk level)": beta_btn,
-        "Sector (overall)": sector_btn,
-        "Sector (overall + by beta)": sector_beta_btn,
-        "Industry": industry_btn,
-        "Industry (+ by beta)": industry_beta_btn,
-    }
- 
-    for mode_name, btn in mode_buttons.items():
-        btn.click(
-            fn=partial(handle_suggestion_round, mode_name),
-            inputs=[picks_input, session_state, picks_table, suggestions_table],
-            outputs=[picks_table, suggestions_table, session_state, status],
-        )
- 
-    evaluate_btn.click(
-        fn=evaluate_with_llm,
-        inputs=[llm_choice, session_state],
-        outputs=[
-            evaluation_output, session_state,
-            beta_btn, sector_btn, sector_beta_btn, industry_btn, industry_beta_btn, evaluate_btn,
-        ],
+    search_button.click(
+        fn=run_search,
+        inputs=[picks_input, mode_input],
+        outputs=[picks_table, suggestions_table, session_state, status,
+                 eval_backend, eval_button, more_button, eval_output],
+    )
+    more_button.click(
+        fn=run_more,
+        inputs=[session_state, mode_input, suggestions_table],
+        outputs=[suggestions_table, session_state],
+    )
+    eval_button.click(
+        fn=run_evaluation,
+        inputs=[session_state, eval_backend],
+        outputs=[eval_output, more_button, eval_button, eval_backend],
     )
  
 if __name__ == "__main__":
