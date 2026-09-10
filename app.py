@@ -5,11 +5,13 @@ from difflib import SequenceMatcher
 import pandas as pd
 from pathlib import Path
 import gradio as gr
+import spaces
 
 try:
     import yfinance as yf
 except ImportError:
     sys.exit("yfinance is not installed. Run: pip install yfinance --upgrade")
+
 
 DATA_DIR = Path(__file__).parent / "data"
 TICKER_CSVS = [
@@ -129,7 +131,9 @@ SECTOR_TO_FUND_CATEGORY = {
     "Basic Materials": "Broad Market", "Telecommunications": "Technology Sector",
 }
 
-
+@spaces.GPU
+def _gpu_startup_stub():
+    return True
 # ------------------------------ DATA LOADING -------------------------------
 
 def safe_str(value, default="N/A") -> str:
