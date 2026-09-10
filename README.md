@@ -1,5 +1,5 @@
 ---
-title: {{Stock_SuggestorCS1}}
+title: Stock_SuggestorCS1
 emoji: 📈
 colorFrom: blue
 colorTo: green
