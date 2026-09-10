@@ -4,6 +4,7 @@ from difflib import SequenceMatcher
 
 import pandas as pd
 from pathlib import Path
+import gradio as gr
 
 try:
     import yfinance as yf
