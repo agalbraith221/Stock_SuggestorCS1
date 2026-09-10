@@ -644,9 +644,7 @@ def build_evaluation_prompt(picks_info, all_suggestions, mode_choice) -> str:
         "on that line. State plainly whether it looks like a good or not-so-good pick "
         "for a long-term portfolio and why, considering its sector/industry, its risk "
         "level (beta) relative to the other symbols listed, and how much it overlaps "
-        "with (or diversifies) the rest of the list. After the last paragraph, add one "
-        "closing sentence reminding the user this is general educational information, "
-        "not financial advice."
+        "with (or diversifies) the rest of the list."
     )
  
  
@@ -698,6 +696,9 @@ def build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_tex
         # Parsing found nothing usable — fall back to showing the raw reply so
         # nothing is silently lost.
         parts.append("---\n" + raw_text)
+ 
+    parts.append("Please remember that these are just suggestions and generalizations, "
+                  "not certified financial advice")
  
     return "\n\n".join(parts)
  
