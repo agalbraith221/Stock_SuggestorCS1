@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 from difflib import SequenceMatcher
@@ -15,6 +16,7 @@ except ImportError:
     sys.exit("yfinance is not installed. Run: pip install yfinance --upgrade")
  
 from huggingface_hub import InferenceClient
+from transformers import pipeline
  
  
 DATA_DIR = Path(__file__).parent / "data"
@@ -582,6 +584,33 @@ def suggestions_to_df(suggestions) -> pd.DataFrame:
 # LLM EVALUATION (deliverable 1: remote HF API call / deliverable 2: local model)
 # ---------------------------------------------------------------------------
  
+def format_stock_block(items, title) -> str:
+    """Deterministically formatted financial-data listing (ticker, company name,
+    price, beta, sector, industry, market cap) built straight from the data we
+    already pulled from yfinance — not something we ask the LLM to reproduce,
+    since models are unreliable at echoing exact numbers."""
+    lines = [f"=== {title} ==="]
+    if not items:
+        lines.append("  (none)")
+        return "\n".join(lines)
+    for it in items:
+        symbol = str(it.get("symbol", "?"))
+        name = str(it.get("name", "?"))
+        price = it.get("price")
+        price_str = f"{price:.3f}" if isinstance(price, (int, float)) else "N/A"
+        beta = it.get("beta")
+        beta_str = f"{beta:.2f}" if isinstance(beta, (int, float)) else "N/A"
+        sector = it.get("sector") or "N/A"
+        industry = it.get("industry_used") or it.get("industry") or "N/A"
+        mcap = it.get("marketCap")
+        mcap_str = f"${mcap:,.0f}" if isinstance(mcap, (int, float)) and mcap else "N/A"
+        lines.append(
+            f"  {symbol:<8} {name:<38} Price: {price_str:<10} Beta: {beta_str:<6} "
+            f"Sector: {sector:<20} Industry: {industry:<28} MktCap: {mcap_str}"
+        )
+    return "\n".join(lines)
+ 
+ 
 def _format_symbol_list(items):
     lines = []
     for it in items:
@@ -598,25 +627,79 @@ def _format_symbol_list(items):
  
  
 def build_evaluation_prompt(picks_info, all_suggestions, mode_choice) -> str:
-    picks_block = _format_symbol_list(picks_info)
-    suggestions_block = _format_symbol_list(all_suggestions)
+    picks_block = format_stock_block(picks_info, "Your Selected Stocks/Funds")
+    suggestions_block = format_stock_block(all_suggestions, "Suggested Stocks/Funds")
+    all_symbols = [it.get("symbol") for it in (picks_info + all_suggestions) if it.get("symbol")]
+    symbols_line = ", ".join(all_symbols)
     return (
         "You are a cautious financial-education assistant, not a licensed financial "
         "advisor. Do not give definitive buy/sell instructions.\n\n"
-        "A user picked the following stocks/funds:\n"
         f"{picks_block}\n\n"
-        f"Using the '{mode_choice}' matching mode, the app suggested these additional "
-        f"stocks/funds:\n{suggestions_block}\n\n"
-        "For EACH suggested stock/fund listed above, output one line in this exact "
-        "format:\n"
-        "SYMBOL — Good pick / Not a great fit — <one or two sentence reason>\n\n"
-        "Base the verdict on how the suggestion compares to the user's original picks: "
-        "does it improve diversification, does it duplicate a sector/industry the user "
-        "is already heavily exposed to, and is its beta (risk level) a reasonable fit "
-        "alongside the original picks. After the per-symbol lines, add one short overall "
-        "summary paragraph, then end with a one-sentence reminder that this is general "
-        "educational information, not financial advice."
+        f"(Suggestions were generated using the '{mode_choice}' matching mode.)\n"
+        f"{suggestions_block}\n\n"
+        f"For EACH of the following symbols, in this exact order, write one short "
+        f"paragraph (2-4 sentences):\n{symbols_line}\n\n"
+        "Start each paragraph on its own line with the symbol followed by a colon, "
+        "for example 'AAPL: ...' — use the symbol exactly as given, nothing before it "
+        "on that line. State plainly whether it looks like a good or not-so-good pick "
+        "for a long-term portfolio and why, considering its sector/industry, its risk "
+        "level (beta) relative to the other symbols listed, and how much it overlaps "
+        "with (or diversifies) the rest of the list. After the last paragraph, add one "
+        "closing sentence reminding the user this is general educational information, "
+        "not financial advice."
     )
+ 
+ 
+def parse_llm_reasoning(text: str, symbols) -> dict:
+    """Pull each 'SYMBOL: ...' paragraph out of the model's free-form reply so it
+    can be lined up with the data block for that symbol."""
+    reasoning = {}
+    if not text or not symbols:
+        return reasoning
+    pattern = re.compile(
+        r"^\s*\**\s*(" + "|".join(re.escape(s) for s in symbols) + r")\s*\**\s*[:\u2014-]\s*(.*)$",
+        re.IGNORECASE,
+    )
+    current, buffer = None, []
+    for line in text.splitlines():
+        m = pattern.match(line)
+        if m:
+            if current:
+                reasoning[current] = " ".join(buffer).strip()
+            current = m.group(1).upper()
+            buffer = [m.group(2).strip()]
+        elif current:
+            buffer.append(line.strip())
+    if current:
+        reasoning[current] = " ".join(buffer).strip()
+    return reasoning
+ 
+ 
+def build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_text, backend_choice) -> str:
+    """Combine the deterministic financial-data listing with the LLM's per-symbol
+    reasoning, in the style: data line, then why it's a good/bad pick."""
+    parts = [f"**Model used:** {backend_choice}", ""]
+ 
+    def render_section(items, title):
+        section = [f"```\n{format_stock_block(items, title)}\n```"]
+        for it in items:
+            sym = str(it.get("symbol", "")).upper()
+            reason = reasoning_by_symbol.get(sym)
+            if reason:
+                section.append(f"**{sym}** — {reason}")
+        return "\n\n".join(section)
+ 
+    if picks_info:
+        parts.append(render_section(picks_info, "Your Selected Stocks/Funds"))
+    if all_suggestions:
+        parts.append(render_section(all_suggestions, "Suggested Stocks/Funds"))
+ 
+    if not reasoning_by_symbol:
+        # Parsing found nothing usable — fall back to showing the raw reply so
+        # nothing is silently lost.
+        parts.append("---\n" + raw_text)
+ 
+    return "\n\n".join(parts)
  
  
 _local_tokenizer = None  # lazy-loaded alongside _local_pipe
@@ -661,7 +744,7 @@ def evaluate_locally(prompt: str) -> str:
  
     output = pipe(
         templated,
-        max_new_tokens=700,
+        max_new_tokens=900,
         do_sample=True,
         temperature=0.7,
         return_full_text=False,  # only the completion, not the echoed prompt
@@ -681,13 +764,29 @@ def evaluate_locally(prompt: str) -> str:
     return text
  
  
+def _get_hf_token():
+    for var in ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN", "HUGGINGFACE_TOKEN"):
+        val = os.environ.get(var)
+        if val:
+            return val
+    return None
+ 
+ 
 def evaluate_remotely(prompt: str) -> str:
     """Call a hosted LLM through the Hugging Face Inference API."""
-    token = os.environ.get("HF_TOKEN")
+    token = _get_hf_token()
+    if not token:
+        raise RuntimeError(
+            "No Hugging Face token found in this environment. On a Hugging Face "
+            "Space: go to Settings -> Variables and secrets -> New secret, add one "
+            "named HF_TOKEN with a token that has Inference Providers access, then "
+            "restart the Space. Running locally: run `hf auth login`, or "
+            "`export HF_TOKEN=hf_...` before starting the app."
+        )
     client = InferenceClient(model=REMOTE_MODEL, token=token)
     completion = client.chat_completion(
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=600,
+        max_tokens=900,
         temperature=0.7,
     )
     return completion.choices[0].message.content.strip()
@@ -702,13 +801,15 @@ def run_evaluation(state, backend_choice):
         return "Get some suggestions first, then evaluate them.", gr.update(), gr.update(), gr.update()
  
     prompt = build_evaluation_prompt(picks_info, all_suggestions, mode_choice)
+    all_symbols = [it.get("symbol") for it in (picks_info + all_suggestions) if it.get("symbol")]
  
     try:
         if backend_choice.startswith("Local"):
-            evaluation = evaluate_locally(prompt)
+            raw_text = evaluate_locally(prompt)
         else:
-            evaluation = evaluate_remotely(prompt)
-        evaluation = f"**Model used:** {backend_choice}\n\n{evaluation}"
+            raw_text = evaluate_remotely(prompt)
+        reasoning_by_symbol = parse_llm_reasoning(raw_text, all_symbols)
+        evaluation = build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_text, backend_choice)
     except Exception as e:
         import traceback
         traceback.print_exc()  # full stack trace in the Space's container logs
