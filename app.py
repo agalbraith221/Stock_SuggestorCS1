@@ -2,6 +2,7 @@ import os
 import sys
 import time
 from difflib import SequenceMatcher
+from functools import partial
  
 import pandas as pd
 from pathlib import Path
@@ -526,7 +527,8 @@ def build_suggestions(universe, picks_info, exclude_symbols, group_key,
     return combined[:NUM_SUGGESTIONS]
  
  
-# (group_key, broad_funds, use_beta_filter)
+# (group_key, broad_funds, use_beta_filter) - order here is also the order the
+# mode buttons are drawn in, left to right.
 MODE_LABELS = {
     "Beta (closest risk level)": (None, False, True),
     "Sector (overall)": ("sector", True, False),
@@ -605,11 +607,15 @@ def build_evaluation_prompt(picks_info, all_suggestions, mode_choice) -> str:
         f"{picks_block}\n\n"
         f"Using the '{mode_choice}' matching mode, the app suggested these additional "
         f"stocks/funds:\n{suggestions_block}\n\n"
-        "In 4-6 short bullet points, evaluate the suggestions as potential additions to "
-        "a long-term investment portfolio. Comment on diversification, sector/industry "
-        "concentration, and relative risk (beta) versus the original picks. Call out which "
-        "suggestions look strongest and which look weakest, and why. End with one sentence "
-        "reminding the user this is general educational information, not financial advice."
+        "For EACH suggested stock/fund listed above, output one line in this exact "
+        "format:\n"
+        "SYMBOL — Good pick / Not a great fit — <one or two sentence reason>\n\n"
+        "Base the verdict on how the suggestion compares to the user's original picks: "
+        "does it improve diversification, does it duplicate a sector/industry the user "
+        "is already heavily exposed to, and is its beta (risk level) a reasonable fit "
+        "alongside the original picks. After the per-symbol lines, add one short overall "
+        "summary paragraph, then end with a one-sentence reminder that this is general "
+        "educational information, not financial advice."
     )
  
  
@@ -633,7 +639,7 @@ def evaluate_locally(prompt: str) -> str:
     """Run the evaluation on the Space's own (ZeroGPU) compute — no remote API call."""
     pipe = get_local_pipeline()
     messages = [{"role": "user", "content": prompt}]
-    output = pipe(messages, max_new_tokens=500, do_sample=True, temperature=0.7)
+    output = pipe(messages, max_new_tokens=600, do_sample=True, temperature=0.7)
     generated = output[0]["generated_text"]
     if isinstance(generated, list) and generated:
         return generated[-1].get("content", "").strip()
@@ -646,7 +652,7 @@ def evaluate_remotely(prompt: str) -> str:
     client = InferenceClient(model=REMOTE_MODEL, token=token)
     completion = client.chat_completion(
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=500,
+        max_tokens=600,
         temperature=0.7,
     )
     return completion.choices[0].message.content.strip()
@@ -677,10 +683,11 @@ def run_evaluation(state, backend_choice):
             "memory/GPU available."
         )
  
-    # Evaluation ends the suggestion loop: lock further "show more" / re-evaluation.
+    # Evaluation ends the suggestion loop: hide the mode buttons and lock the
+    # evaluation controls so no further suggestions or re-evaluations happen.
     return (
         evaluation,
-        gr.update(interactive=False),  # more_button
+        gr.update(visible=False),      # mode_buttons_row
         gr.update(interactive=False),  # eval_button
         gr.update(interactive=False),  # eval_backend
     )
@@ -688,16 +695,21 @@ def run_evaluation(state, backend_choice):
  
 # GRADIO CALLBACKS -----------------------------
  
-def run_search(picks_text, mode_choice, progress=gr.Progress()):
+def resolve_picks(picks_text, progress=gr.Progress()):
+    """Step 1: resolve the user's typed picks to real tickers and show them.
+    The mode buttons (and, later, the AI evaluation button) only appear once
+    picks have actually been resolved."""
+    empty = pd.DataFrame()
+ 
     if not picks_text or not picks_text.strip():
-        empty = pd.DataFrame()
-        state = {"picks_info": [], "exclude": [], "mode": mode_choice, "all_suggestions": []}
+        state = {"picks_info": [], "exclude": [], "mode": None, "all_suggestions": []}
         return (
-            empty, empty, state, DATA_LOAD_WARNING,
-            gr.update(visible=False),                       # eval_backend
-            gr.update(visible=False, interactive=True),      # eval_button
-            gr.update(interactive=True),                     # more_button
-            "",                                              # eval_output
+            empty, state, DATA_LOAD_WARNING,
+            gr.update(visible=False),        # mode_buttons_row
+            empty,                           # suggestions_table reset
+            gr.update(visible=False),        # eval_backend
+            gr.update(visible=False),        # eval_button
+            "",                               # eval_output reset
         )
  
     if picks_text.strip().lower() == "default":
@@ -718,49 +730,50 @@ def run_search(picks_text, mode_choice, progress=gr.Progress()):
         progress((i + 1) / (len(queries) + 1), desc=f"Fetched {symbol}")
  
     exclude = {p["symbol"].upper() for p in picks_info}
- 
-    progress(0.6, desc="Finding suggestions...")
-    suggestions = generate_suggestions(mode_choice, picks_info, exclude)
-    exclude.update(s["symbol"].upper() for s in suggestions if s.get("symbol"))
- 
-    state = {
-        "picks_info": picks_info,
-        "exclude": list(exclude),
-        "mode": mode_choice,
-        "all_suggestions": list(suggestions),
-    }
+    state = {"picks_info": picks_info, "exclude": list(exclude), "mode": None, "all_suggestions": []}
     warning = DATA_LOAD_WARNING if UNIVERSE.empty else ""
-    has_suggestions = bool(suggestions)
+    has_picks = bool(picks_info)
+ 
     return (
-        picks_info_to_df(picks_info), suggestions_to_df(suggestions), state, warning,
-        gr.update(visible=has_suggestions),                     # eval_backend
-        gr.update(visible=has_suggestions, interactive=True),   # eval_button
-        gr.update(interactive=True),                            # more_button
-        "",                                                     # eval_output
+        picks_info_to_df(picks_info), state, warning,
+        gr.update(visible=has_picks),   # mode_buttons_row: show once picks exist
+        empty,                          # suggestions_table reset
+        gr.update(visible=False),       # eval_backend: not until suggestions exist
+        gr.update(visible=False),       # eval_button
+        "",                              # eval_output reset
     )
  
  
-def run_more(state, mode_choice, current_suggestions_df):
-    """Fetch another 5 suggestions. Reads the mode radio fresh each click, so the
-    matching criteria can be changed on every rotation."""
+def add_suggestions(mode_choice, state, current_suggestions_df):
+    """Step 2: clicking one of the mode buttons (under 'Your Picks') fetches
+    5 suggestions using that mode. Clicking again (same or a different mode
+    button) fetches 5 more, so the buttons double as the 'rotation' control."""
     picks_info = state.get("picks_info", [])
-    exclude = set(state.get("exclude", []))
- 
     if not picks_info:
-        return current_suggestions_df, state
+        return current_suggestions_df, state, gr.update(visible=False), gr.update(visible=False)
  
+    exclude = set(state.get("exclude", []))
     more = generate_suggestions(mode_choice, picks_info, exclude)
-    if not more:
-        return current_suggestions_df, state
  
-    exclude.update(s["symbol"].upper() for s in more if s.get("symbol"))
-    state["exclude"] = list(exclude)
-    state["mode"] = mode_choice  # remember most recent mode for the AI evaluation prompt
-    state["all_suggestions"] = state.get("all_suggestions", []) + list(more)
+    if more:
+        exclude.update(s["symbol"].upper() for s in more if s.get("symbol"))
+        state["exclude"] = list(exclude)
+        state["mode"] = mode_choice
+        state["all_suggestions"] = state.get("all_suggestions", []) + list(more)
+        new_df = suggestions_to_df(more)
+        if current_suggestions_df is None or current_suggestions_df.empty:
+            combined = new_df
+        else:
+            combined = pd.concat([current_suggestions_df, new_df], ignore_index=True)
+    else:
+        combined = current_suggestions_df
  
-    new_df = suggestions_to_df(more)
-    combined = pd.concat([current_suggestions_df, new_df], ignore_index=True)
-    return combined, state
+    has_suggestions = bool(state.get("all_suggestions"))
+    return (
+        combined, state,
+        gr.update(visible=has_suggestions),                    # eval_backend
+        gr.update(visible=has_suggestions, interactive=True),  # eval_button
+    )
  
  
 # UI LAYOUT ---------------------
@@ -768,28 +781,20 @@ def run_more(state, mode_choice, current_suggestions_df):
 with gr.Blocks(title="Stock Suggestor") as demo:
     gr.Markdown(
         "# 📈 Stock Suggestor\n"
-        "Enter up to 5 stocks/funds — tickers, company names, or common nicknames "
-        "(e.g. `AAPL, google, tesla, SPY`) — or type **default** for a starter set "
-        "(Apple, Google, Nvidia, Tesla + S&P 500). Pick a matching mode below — you "
-        "can change it before each new batch of suggestions."
+        "1. Enter up to 5 stocks/funds — tickers, company names, or common nicknames "
+        "(e.g. `AAPL, google, tesla, SPY`) — or type **default** for a starter set.\n"
+        "2. Once your picks are resolved, choose a matching mode below them to pull "
+        "5 suggestions at a time — click any mode button again for 5 more.\n"
+        "3. When you're ready, evaluate everything with AI (this ends the round)."
     )
     if DATA_LOAD_WARNING:
         gr.Markdown(f"⚠️ {DATA_LOAD_WARNING}")
  
-    with gr.Row():
-        picks_input = gr.Textbox(
-            label="Your picks (comma-separated)",
-            placeholder="AAPL, google, tesla, SPY, default...",
-            scale=3,
-        )
-        mode_input = gr.Radio(
-            choices=list(MODE_LABELS.keys()),
-            value="Industry",
-            label="Suggest by",
-            scale=2,
-        )
- 
-    search_button = gr.Button("Get Suggestions", variant="primary")
+    picks_input = gr.Textbox(
+        label="Your picks (comma-separated)",
+        placeholder="AAPL, google, tesla, SPY, default...",
+    )
+    resolve_button = gr.Button("Get My Picks", variant="primary")
     status = gr.Markdown()
  
     gr.Markdown("### Your Picks")
@@ -799,14 +804,16 @@ with gr.Blocks(title="Stock Suggestor") as demo:
         wrap=True,
     )
  
-    gr.Markdown("### Suggestions (scroll for more)")
+    gr.Markdown("### Suggest by (click a mode to add 5 suggestions; click again for 5 more)")
+    with gr.Row(visible=False) as mode_buttons_row:
+        mode_buttons = {label: gr.Button(label) for label in MODE_LABELS}
+ 
+    gr.Markdown("### Suggestions")
     suggestions_table = gr.Dataframe(
         headers=["Symbol", "Name", "Type", "Sector", "Industry", "Beta"],
         max_height=420,  # scrollable results panel
         wrap=True,
     )
- 
-    more_button = gr.Button("Show 5 More Suggestions")
  
     gr.Markdown("### AI Portfolio Evaluation")
     eval_backend = gr.Radio(
@@ -815,26 +822,29 @@ with gr.Blocks(title="Stock Suggestor") as demo:
         label="Run evaluation using",
         visible=False,
     )
-    eval_button = gr.Button("🤖 Evaluate picks with AI (ends suggestion loop)", visible=False)
+    eval_button = gr.Button("🤖 Evaluate picks with AI (ends this round)", visible=False)
     eval_output = gr.Markdown()
  
     session_state = gr.State({})
  
-    search_button.click(
-        fn=run_search,
-        inputs=[picks_input, mode_input],
-        outputs=[picks_table, suggestions_table, session_state, status,
-                 eval_backend, eval_button, more_button, eval_output],
+    resolve_button.click(
+        fn=resolve_picks,
+        inputs=[picks_input],
+        outputs=[picks_table, session_state, status,
+                 mode_buttons_row, suggestions_table, eval_backend, eval_button, eval_output],
     )
-    more_button.click(
-        fn=run_more,
-        inputs=[session_state, mode_input, suggestions_table],
-        outputs=[suggestions_table, session_state],
-    )
+ 
+    for label, btn in mode_buttons.items():
+        btn.click(
+            fn=partial(add_suggestions, label),
+            inputs=[session_state, suggestions_table],
+            outputs=[suggestions_table, session_state, eval_backend, eval_button],
+        )
+ 
     eval_button.click(
         fn=run_evaluation,
         inputs=[session_state, eval_backend],
-        outputs=[eval_output, more_button, eval_button, eval_backend],
+        outputs=[eval_output, mode_buttons_row, eval_button, eval_backend],
     )
  
 if __name__ == "__main__":
