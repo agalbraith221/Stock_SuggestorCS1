@@ -1,4 +1,15 @@
+import sys
+import time
+from difflib import SequenceMatcher
+
+import pandas as pd
 from pathlib import Path
+
+try:
+    import yfinance as yf
+except ImportError:
+    sys.exit("yfinance is not installed. Run: pip install yfinance --upgrade")
+
 DATA_DIR = Path(__file__).parent / "data"
 TICKER_CSVS = [
     DATA_DIR / "nasdaq_full_tickers.csv",
