@@ -15,7 +15,7 @@ MAX_PER_GROUP = 2
 CANDIDATES_PER_GROUP = 15
 BETA_WINDOW = 0.2
 NEUTRAL_BETA = 1.0
-LIVE_FETCH_DELAY = 0.2  # be polite to yfinance
+LIVE_FETCH_DELAY = 0.2  #polite to yfinance
 
 FUND_QUOTE_TYPES = {"ETF", "MUTUALFUND", "INDEX"}
 
@@ -160,7 +160,7 @@ DATA_LOAD_WARNING = (
 ) if UNIVERSE.empty else ""
 
 
-# ------------------------------ MATCHING -----------------------------------
+#MATCHING
 
 def name_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
@@ -219,7 +219,7 @@ def resolve_pick(universe: pd.DataFrame, query: str) -> tuple:
     return chosen["symbol_clean"], note
 
 
-# ------------------------------ LIVE DATA -----------------------------------
+#LIVE DATA:
 
 def fetch_live_info(ticker: str) -> dict:
     info = {}
@@ -257,8 +257,7 @@ def fetch_live_info(ticker: str) -> dict:
     }
 
 
-# ------------------------------ SUGGESTION ENGINE ----------------------------
-
+#SUGGESTION ENGINE:
 def allocate_slots_by_group(groups, total_slots=NUM_SUGGESTIONS) -> dict:
     groups = list(dict.fromkeys(groups))
     if not groups:
@@ -504,7 +503,7 @@ def generate_suggestions(mode_choice, picks_info, exclude_symbols):
                               broad_funds=broad_funds, use_beta_filter=use_beta_filter)
 
 
-# ------------------------------ FORMATTING -----------------------------------
+#FORMATTING
 
 def picks_info_to_df(picks_info) -> pd.DataFrame:
     rows = []
@@ -538,7 +537,7 @@ def suggestions_to_df(suggestions) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ------------------------------ GRADIO CALLBACKS -----------------------------
+#GRADIO CALLBACKS -----------------------------
 
 def run_search(picks_text, mode_choice, progress=gr.Progress()):
     if not picks_text or not picks_text.strip():
@@ -593,7 +592,7 @@ def run_more(state, current_suggestions_df):
     return combined, state
 
 
-# ------------------------------ UI LAYOUT -------------------------------------
+#UI LAYOUT ---------------------
 
 with gr.Blocks(title="Stock Suggestor") as demo:
     gr.Markdown(
