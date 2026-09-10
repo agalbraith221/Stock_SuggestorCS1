@@ -8,6 +8,7 @@ import pandas as pd
 from pathlib import Path
 import gradio as gr
 import spaces
+from transformers import pipeline
  
 try:
     import yfinance as yf
