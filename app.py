@@ -8,7 +8,6 @@ import pandas as pd
 from pathlib import Path
 import gradio as gr
 import spaces
-from transformers import pipeline
  
 try:
     import yfinance as yf
@@ -620,31 +619,66 @@ def build_evaluation_prompt(picks_info, all_suggestions, mode_choice) -> str:
     )
  
  
+_local_tokenizer = None  # lazy-loaded alongside _local_pipe
+ 
+ 
 def get_local_pipeline():
     """Lazily load the local transformers pipeline the first time it's used."""
-    global _local_pipe
+    global _local_pipe, _local_tokenizer
     if _local_pipe is None:
-        from transformers import pipeline
+        from transformers import pipeline, AutoTokenizer
         import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _local_tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL)
         _local_pipe = pipeline(
             "text-generation",
             model=LOCAL_MODEL,
+            tokenizer=_local_tokenizer,
             dtype="auto",
-            device="cuda" if torch.cuda.is_available() else "cpu",
+            device=device,
         )
-    return _local_pipe
+    return _local_pipe, _local_tokenizer
  
  
-@spaces.GPU(duration=60)
+@spaces.GPU(duration=120)  # give a cold model download + generation enough time
 def evaluate_locally(prompt: str) -> str:
     """Run the evaluation on the Space's own (ZeroGPU) compute — no remote API call."""
-    pipe = get_local_pipeline()
+    pipe, tokenizer = get_local_pipeline()
     messages = [{"role": "user", "content": prompt}]
-    output = pipe(messages, max_new_tokens=600, do_sample=True, temperature=0.7)
-    generated = output[0]["generated_text"]
-    if isinstance(generated, list) and generated:
-        return generated[-1].get("content", "").strip()
-    return str(generated).strip()
+ 
+    # Qwen3 models "think" by default — they wrap hidden reasoning in
+    # <think>...</think> before the real answer, which can eat the whole
+    # token budget and leave the visible answer empty. Turn that off.
+    try:
+        templated = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+    except TypeError:
+        # Fallback for models/tokenizers without an `enable_thinking` option.
+        templated = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+ 
+    output = pipe(
+        templated,
+        max_new_tokens=700,
+        do_sample=True,
+        temperature=0.7,
+        return_full_text=False,  # only the completion, not the echoed prompt
+    )
+    text = output[0]["generated_text"]
+ 
+    # Belt-and-suspenders: strip any leftover <think> block that slipped through.
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+    text = text.strip()
+ 
+    if not text:
+        raise RuntimeError(
+            "The local model returned an empty response — it may have used its "
+            "entire token budget on internal reasoning. Try again."
+        )
+    return text
  
  
 def evaluate_remotely(prompt: str) -> str:
@@ -676,12 +710,15 @@ def run_evaluation(state, backend_choice):
             evaluation = evaluate_remotely(prompt)
         evaluation = f"**Model used:** {backend_choice}\n\n{evaluation}"
     except Exception as e:
+        import traceback
+        traceback.print_exc()  # full stack trace in the Space's container logs
         evaluation = (
             f"⚠️ Evaluation failed using {backend_choice}: {e}\n\n"
             "If you picked the Hugging Face API option, make sure this Space has an "
             "`HF_TOKEN` secret configured with Inference Providers access. If you picked "
             "Local, make sure `transformers`/`torch` are installed and there's enough "
-            "memory/GPU available."
+            "memory/GPU available. Check the Space's logs (or your terminal) for the "
+            "full error."
         )
  
     # Evaluation ends the suggestion loop: hide the mode buttons and lock the
