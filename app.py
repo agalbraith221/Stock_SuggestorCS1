@@ -4,6 +4,7 @@ import sys
 import time
 from difflib import SequenceMatcher
 from functools import partial
+from typing import Optional
  
 import pandas as pd
 from pathlib import Path
@@ -765,18 +766,16 @@ def evaluate_locally(prompt: str) -> str:
     return text
  
  
-def evaluate_remotely(prompt: str, user_token: str) -> str:
+def evaluate_remotely(prompt: str, user_token: Optional[str]) -> str:
     """Call a hosted LLM through the Hugging Face Inference API using the
-    *visitor's own* Hugging Face token, so usage/credits are billed to their
-    account rather than the Space owner's."""
+    *visitor's own* Hugging Face account (via Sign in with Hugging Face), so
+    usage/credits are billed to their account rather than the Space owner's."""
     token = (user_token or "").strip()
     if not token:
         raise RuntimeError(
-            "No Hugging Face token was provided. Paste your own personal access "
-            "token into the box above to run a remote evaluation on your own "
-            "account's usage/credits. Get one at "
-            "https://huggingface.co/settings/tokens (a Read or fine-grained token "
-            "with 'Make calls to Inference Providers' permission works)."
+            "You're not logged in with Hugging Face. Click the 'Sign in with "
+            "Hugging Face' button above and try again — the remote evaluation "
+            "runs on your own account's usage/credits, not the Space owner's."
         )
     client = InferenceClient(model=REMOTE_MODEL, token=token)
     completion = client.chat_completion(
@@ -787,14 +786,14 @@ def evaluate_remotely(prompt: str, user_token: str) -> str:
     return completion.choices[0].message.content.strip()
  
  
-def run_evaluation(state, backend_choice, user_hf_token):
+def run_evaluation(state, backend_choice, oauth_token: Optional[gr.OAuthToken]):
     picks_info = state.get("picks_info", [])
     all_suggestions = state.get("all_suggestions", [])
     mode_choice = state.get("mode", "")
  
     if not picks_info or not all_suggestions:
         return ("Get some suggestions first, then evaluate them.",
-                gr.update(), gr.update(), gr.update(), gr.update())
+                gr.update(), gr.update(), gr.update())
  
     prompt = build_evaluation_prompt(picks_info, all_suggestions, mode_choice)
     all_symbols = [it.get("symbol") for it in (picks_info + all_suggestions) if it.get("symbol")]
@@ -808,7 +807,8 @@ def run_evaluation(state, backend_choice, user_hf_token):
             # yours instead of the original owner's.
             raw_text = evaluate_locally(prompt)
         else:
-            raw_text = evaluate_remotely(prompt, user_hf_token)
+            user_token = getattr(oauth_token, "token", None)
+            raw_text = evaluate_remotely(prompt, user_token)
         reasoning_by_symbol = parse_llm_reasoning(raw_text, all_symbols)
         evaluation = build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_text, backend_choice)
     except Exception as e:
@@ -816,10 +816,11 @@ def run_evaluation(state, backend_choice, user_hf_token):
         traceback.print_exc()  # full stack trace in the Space's container logs
         evaluation = (
             f"⚠️ Evaluation failed using {backend_choice}: {e}\n\n"
-            "If you picked the Hugging Face API option, make sure you pasted your "
-            "own personal access token above. If you picked Local, make sure "
-            "`transformers`/`torch` are installed and there's enough memory/GPU "
-            "available. Check the Space's logs (or your terminal) for the full error."
+            "If you picked the Hugging Face API option, make sure you're signed "
+            "in with the 'Sign in with Hugging Face' button above. If you picked "
+            "Local, make sure `transformers`/`torch` are installed and there's "
+            "enough memory/GPU available. Check the Space's logs (or your "
+            "terminal) for the full error."
         )
  
     # Evaluation ends the suggestion loop: hide the mode buttons and lock the
@@ -829,7 +830,6 @@ def run_evaluation(state, backend_choice, user_hf_token):
         gr.update(visible=False),      # mode_buttons_row
         gr.update(interactive=False),  # eval_button
         gr.update(interactive=False),  # eval_backend
-        gr.update(interactive=False),  # hf_token_input
     )
  
  
@@ -850,7 +850,6 @@ def resolve_picks(picks_text, progress=gr.Progress()):
             gr.update(visible=False),        # eval_backend
             gr.update(visible=False, interactive=True),  # eval_button
             "",                               # eval_output reset
-            gr.update(visible=False, value="", interactive=True),  # hf_token_input
         )
  
     if picks_text.strip().lower() == "default":
@@ -882,7 +881,6 @@ def resolve_picks(picks_text, progress=gr.Progress()):
         gr.update(visible=False),       # eval_backend: not until suggestions exist
         gr.update(visible=False, interactive=True),  # eval_button
         "",                              # eval_output reset
-        gr.update(visible=False, value="", interactive=True),  # hf_token_input
     )
  
  
@@ -893,7 +891,7 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
     picks_info = state.get("picks_info", [])
     if not picks_info:
         return (current_suggestions_df, state,
-                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
+                gr.update(visible=False), gr.update(visible=False))
  
     exclude = set(state.get("exclude", []))
     more = generate_suggestions(mode_choice, picks_info, exclude)
@@ -916,13 +914,19 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
         combined, state,
         gr.update(visible=has_suggestions),                    # eval_backend
         gr.update(visible=has_suggestions, interactive=True),  # eval_button
-        gr.update(visible=has_suggestions),                    # hf_token_input
     )
  
  
 # UI LAYOUT ---------------------
  
 with gr.Blocks(title="Stock Suggestor") as demo:
+    with gr.Sidebar():
+        gr.Markdown(
+            "Sign in to run the AI evaluation's **Hugging Face API** option on "
+            "your own account's usage/credits instead of the Space owner's."
+        )
+        gr.LoginButton()
+ 
     gr.Markdown(
         "# 📈 Stock Suggestor\n"
         "1. Enter up to 5 stocks/funds — tickers, company names, or common nicknames "
@@ -961,11 +965,10 @@ with gr.Blocks(title="Stock Suggestor") as demo:
  
     gr.Markdown(
         "### AI Portfolio Evaluation\n"
-        "**Hugging Face API** option: uses *your own* Hugging Face account's usage — "
-        "paste your own personal access token below (never stored, used only for this "
-        "request). Get one at https://huggingface.co/settings/tokens.\n\n"
-        "**Local** option: runs on this Space's own hardware regardless of whose "
-        "token is entered — a hosted Space can't redirect compute to a visitor's own "
+        "**Hugging Face API** option: runs using *your own* Hugging Face account's "
+        "usage — click 'Sign in with Hugging Face' in the sidebar first.\n\n"
+        "**Local** option: runs on this Space's own hardware regardless of who's "
+        "signed in — a hosted Space can't redirect compute to a visitor's own "
         "machine. If that cost matters to you, duplicate this Space into your own "
         "account so the compute used is billed to you instead."
     )
@@ -973,12 +976,6 @@ with gr.Blocks(title="Stock Suggestor") as demo:
         choices=[f"Local ({LOCAL_MODEL})", f"Hugging Face API ({REMOTE_MODEL})"],
         value=f"Local ({LOCAL_MODEL})",
         label="Run evaluation using",
-        visible=False,
-    )
-    hf_token_input = gr.Textbox(
-        label="Your Hugging Face access token (only needed for the API option)",
-        placeholder="hf_...",
-        type="password",
         visible=False,
     )
     eval_button = gr.Button("🤖 Evaluate picks with AI (ends this round)", visible=False)
@@ -991,20 +988,23 @@ with gr.Blocks(title="Stock Suggestor") as demo:
         inputs=[picks_input],
         outputs=[picks_table, session_state, status,
                  mode_buttons_row, suggestions_table, eval_backend, eval_button,
-                 eval_output, hf_token_input],
+                 eval_output],
     )
  
     for label, btn in mode_buttons.items():
         btn.click(
             fn=partial(add_suggestions, label),
             inputs=[session_state, suggestions_table],
-            outputs=[suggestions_table, session_state, eval_backend, eval_button, hf_token_input],
+            outputs=[suggestions_table, session_state, eval_backend, eval_button],
         )
  
+    # Note: oauth_token is intentionally NOT in `inputs=` — Gradio auto-injects
+    # the signed-in visitor's Hugging Face OAuthToken into any handler argument
+    # annotated as gr.OAuthToken, the same way `gr.Request` is auto-injected.
     eval_button.click(
         fn=run_evaluation,
-        inputs=[session_state, eval_backend, hf_token_input],
-        outputs=[eval_output, mode_buttons_row, eval_button, eval_backend, hf_token_input],
+        inputs=[session_state, eval_backend],
+        outputs=[eval_output, mode_buttons_row, eval_button, eval_backend],
     )
  
 if __name__ == "__main__":
