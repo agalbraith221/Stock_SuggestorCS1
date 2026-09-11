@@ -965,12 +965,8 @@ with gr.Blocks(title="Stock Suggestor") as demo:
  
     gr.Markdown(
         "### AI Portfolio Evaluation\n"
-        "**Hugging Face API** option: runs using *your own* Hugging Face account's "
-        "usage — click 'Sign in with Hugging Face' in the sidebar first.\n\n"
-        "**Local** option: runs on this Space's own hardware regardless of who's "
-        "signed in — a hosted Space can't redirect compute to a visitor's own "
-        "machine. If that cost matters to you, duplicate this Space into your own "
-        "account so the compute used is billed to you instead."
+        "**Hugging Face API** option: click 'Sign in with Hugging Face' in the sidebar first."
+        "**Local** option: runs on hosted Space."
     )
     eval_backend = gr.Radio(
         choices=[f"Local ({LOCAL_MODEL})", f"Hugging Face API ({REMOTE_MODEL})"],
