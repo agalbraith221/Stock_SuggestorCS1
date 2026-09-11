@@ -765,24 +765,18 @@ def evaluate_locally(prompt: str) -> str:
     return text
  
  
-def _get_hf_token():
-    for var in ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN", "HUGGINGFACE_TOKEN"):
-        val = os.environ.get(var)
-        if val:
-            return val
-    return None
- 
- 
-def evaluate_remotely(prompt: str) -> str:
-    """Call a hosted LLM through the Hugging Face Inference API."""
-    token = _get_hf_token()
+def evaluate_remotely(prompt: str, user_token: str) -> str:
+    """Call a hosted LLM through the Hugging Face Inference API using the
+    *visitor's own* Hugging Face token, so usage/credits are billed to their
+    account rather than the Space owner's."""
+    token = (user_token or "").strip()
     if not token:
         raise RuntimeError(
-            "No Hugging Face token found in this environment. On a Hugging Face "
-            "Space: go to Settings -> Variables and secrets -> New secret, add one "
-            "named HF_TOKEN with a token that has Inference Providers access, then "
-            "restart the Space. Running locally: run `hf auth login`, or "
-            "`export HF_TOKEN=hf_...` before starting the app."
+            "No Hugging Face token was provided. Paste your own personal access "
+            "token into the box above to run a remote evaluation on your own "
+            "account's usage/credits. Get one at "
+            "https://huggingface.co/settings/tokens (a Read or fine-grained token "
+            "with 'Make calls to Inference Providers' permission works)."
         )
     client = InferenceClient(model=REMOTE_MODEL, token=token)
     completion = client.chat_completion(
@@ -793,22 +787,28 @@ def evaluate_remotely(prompt: str) -> str:
     return completion.choices[0].message.content.strip()
  
  
-def run_evaluation(state, backend_choice):
+def run_evaluation(state, backend_choice, user_hf_token):
     picks_info = state.get("picks_info", [])
     all_suggestions = state.get("all_suggestions", [])
     mode_choice = state.get("mode", "")
  
     if not picks_info or not all_suggestions:
-        return "Get some suggestions first, then evaluate them.", gr.update(), gr.update(), gr.update()
+        return ("Get some suggestions first, then evaluate them.",
+                gr.update(), gr.update(), gr.update(), gr.update())
  
     prompt = build_evaluation_prompt(picks_info, all_suggestions, mode_choice)
     all_symbols = [it.get("symbol") for it in (picks_info + all_suggestions) if it.get("symbol")]
  
     try:
         if backend_choice.startswith("Local"):
+            # Note: this always runs on the Space's own (ZeroGPU) hardware —
+            # there's no way for a hosted Space to redirect compute to a
+            # visitor's own machine. If that cost matters to you, duplicate
+            # the Space into your own account so the compute/quota used is
+            # yours instead of the original owner's.
             raw_text = evaluate_locally(prompt)
         else:
-            raw_text = evaluate_remotely(prompt)
+            raw_text = evaluate_remotely(prompt, user_hf_token)
         reasoning_by_symbol = parse_llm_reasoning(raw_text, all_symbols)
         evaluation = build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_text, backend_choice)
     except Exception as e:
@@ -816,11 +816,10 @@ def run_evaluation(state, backend_choice):
         traceback.print_exc()  # full stack trace in the Space's container logs
         evaluation = (
             f"⚠️ Evaluation failed using {backend_choice}: {e}\n\n"
-            "If you picked the Hugging Face API option, make sure this Space has an "
-            "`HF_TOKEN` secret configured with Inference Providers access. If you picked "
-            "Local, make sure `transformers`/`torch` are installed and there's enough "
-            "memory/GPU available. Check the Space's logs (or your terminal) for the "
-            "full error."
+            "If you picked the Hugging Face API option, make sure you pasted your "
+            "own personal access token above. If you picked Local, make sure "
+            "`transformers`/`torch` are installed and there's enough memory/GPU "
+            "available. Check the Space's logs (or your terminal) for the full error."
         )
  
     # Evaluation ends the suggestion loop: hide the mode buttons and lock the
@@ -830,6 +829,7 @@ def run_evaluation(state, backend_choice):
         gr.update(visible=False),      # mode_buttons_row
         gr.update(interactive=False),  # eval_button
         gr.update(interactive=False),  # eval_backend
+        gr.update(interactive=False),  # hf_token_input
     )
  
  
@@ -848,8 +848,9 @@ def resolve_picks(picks_text, progress=gr.Progress()):
             gr.update(visible=False),        # mode_buttons_row
             empty,                           # suggestions_table reset
             gr.update(visible=False),        # eval_backend
-            gr.update(visible=False),        # eval_button
+            gr.update(visible=False, interactive=True),  # eval_button
             "",                               # eval_output reset
+            gr.update(visible=False, value="", interactive=True),  # hf_token_input
         )
  
     if picks_text.strip().lower() == "default":
@@ -879,8 +880,9 @@ def resolve_picks(picks_text, progress=gr.Progress()):
         gr.update(visible=has_picks),   # mode_buttons_row: show once picks exist
         empty,                          # suggestions_table reset
         gr.update(visible=False),       # eval_backend: not until suggestions exist
-        gr.update(visible=False),       # eval_button
+        gr.update(visible=False, interactive=True),  # eval_button
         "",                              # eval_output reset
+        gr.update(visible=False, value="", interactive=True),  # hf_token_input
     )
  
  
@@ -890,7 +892,8 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
     button) fetches 5 more, so the buttons double as the 'rotation' control."""
     picks_info = state.get("picks_info", [])
     if not picks_info:
-        return current_suggestions_df, state, gr.update(visible=False), gr.update(visible=False)
+        return (current_suggestions_df, state,
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
  
     exclude = set(state.get("exclude", []))
     more = generate_suggestions(mode_choice, picks_info, exclude)
@@ -913,6 +916,7 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
         combined, state,
         gr.update(visible=has_suggestions),                    # eval_backend
         gr.update(visible=has_suggestions, interactive=True),  # eval_button
+        gr.update(visible=has_suggestions),                    # hf_token_input
     )
  
  
@@ -955,11 +959,26 @@ with gr.Blocks(title="Stock Suggestor") as demo:
         wrap=True,
     )
  
-    gr.Markdown("### AI Portfolio Evaluation")
+    gr.Markdown(
+        "### AI Portfolio Evaluation\n"
+        "**Hugging Face API** option: uses *your own* Hugging Face account's usage — "
+        "paste your own personal access token below (never stored, used only for this "
+        "request). Get one at https://huggingface.co/settings/tokens.\n\n"
+        "**Local** option: runs on this Space's own hardware regardless of whose "
+        "token is entered — a hosted Space can't redirect compute to a visitor's own "
+        "machine. If that cost matters to you, duplicate this Space into your own "
+        "account so the compute used is billed to you instead."
+    )
     eval_backend = gr.Radio(
         choices=[f"Local ({LOCAL_MODEL})", f"Hugging Face API ({REMOTE_MODEL})"],
         value=f"Local ({LOCAL_MODEL})",
         label="Run evaluation using",
+        visible=False,
+    )
+    hf_token_input = gr.Textbox(
+        label="Your Hugging Face access token (only needed for the API option)",
+        placeholder="hf_...",
+        type="password",
         visible=False,
     )
     eval_button = gr.Button("🤖 Evaluate picks with AI (ends this round)", visible=False)
@@ -971,20 +990,21 @@ with gr.Blocks(title="Stock Suggestor") as demo:
         fn=resolve_picks,
         inputs=[picks_input],
         outputs=[picks_table, session_state, status,
-                 mode_buttons_row, suggestions_table, eval_backend, eval_button, eval_output],
+                 mode_buttons_row, suggestions_table, eval_backend, eval_button,
+                 eval_output, hf_token_input],
     )
  
     for label, btn in mode_buttons.items():
         btn.click(
             fn=partial(add_suggestions, label),
             inputs=[session_state, suggestions_table],
-            outputs=[suggestions_table, session_state, eval_backend, eval_button],
+            outputs=[suggestions_table, session_state, eval_backend, eval_button, hf_token_input],
         )
  
     eval_button.click(
         fn=run_evaluation,
-        inputs=[session_state, eval_backend],
-        outputs=[eval_output, mode_buttons_row, eval_button, eval_backend],
+        inputs=[session_state, eval_backend, hf_token_input],
+        outputs=[eval_output, mode_buttons_row, eval_button, eval_backend, hf_token_input],
     )
  
 if __name__ == "__main__":
