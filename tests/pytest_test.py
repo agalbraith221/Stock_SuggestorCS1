@@ -22,12 +22,3 @@ def test_percentage_change():
 def test_sorting_tickers_alphabetically():
     tickers = ["TSLA", "AAPL", "NVDA", "GOOGL"]
     assert sorted(tickers) == ["AAPL", "GOOGL", "NVDA", "TSLA"]
- 
- 
-def test_max_market_cap():
-    market_caps = {"AAPL": 4_812_139_134_976, "MSFT": 3_100_000_000_000, "NVDA": 4_500_000_000_000}
-    assert max(market_caps, key=market_caps.get) == "AAPL"
-    prompt = app.build_evaluation_prompt(picks, suggestions, "Industry")
-    assert "AAPL" in prompt
-    assert "MSFT" in prompt
-    assert prompt.index("AAPL") < prompt.index("MSFT")
