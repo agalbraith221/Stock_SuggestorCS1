@@ -17,7 +17,6 @@ except ImportError:
     sys.exit("yfinance is not installed. Run: pip install yfinance --upgrade")
  
 from huggingface_hub import InferenceClient
-from transformers import pipeline
  
  
 DATA_DIR = Path(__file__).parent / "data"
@@ -41,15 +40,13 @@ LIVE_FETCH_DELAY = 0.2  # polite to yfinance
  
 FUND_QUOTE_TYPES = {"ETF", "MUTUALFUND", "INDEX"}
  
-# ---------------------------------------------------------------------------
-# LLM CONFIG
-# One model runs locally on the Space's own compute (transformers pipeline),
-# the other is called remotely through the Hugging Face Inference API.
-# ---------------------------------------------------------------------------
+#LLM:
+#One model runs locally on the Space's own compute (transformers pipeline),
+#the other is called remotely through the Hugging Face Inference API.
 LOCAL_MODEL = "Qwen/Qwen3-0.6B"
 REMOTE_MODEL = "openai/gpt-oss-20b"
  
-_local_pipe = None  # lazy-loaded on first use so app startup stays fast
+_local_pipe = None  #lazy-loaded on first use so app startup stays fast
  
  
 ALIAS_MAP = {
@@ -155,7 +152,7 @@ def _gpu_startup_stub():
     return True
  
  
-# ------------------------------ DATA LOADING -------------------------------
+#DATA LOADING:
  
 def safe_str(value, default="N/A") -> str:
     if value is None:
@@ -198,8 +195,7 @@ DATA_LOAD_WARNING = (
 ) if UNIVERSE.empty else ""
  
  
-# MATCHING
- 
+#MATCHING:
 def name_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
  
@@ -257,8 +253,7 @@ def resolve_pick(universe: pd.DataFrame, query: str) -> tuple:
     return chosen["symbol_clean"], note
  
  
-# LIVE DATA:
- 
+#LIVE DATA:
 def fetch_live_info(ticker: str) -> dict:
     info = {}
     if yf is not None:
@@ -295,7 +290,7 @@ def fetch_live_info(ticker: str) -> dict:
     }
  
  
-# SUGGESTION ENGINE:
+#SUGGESTION ENGINE:
 def allocate_slots_by_group(groups, total_slots=NUM_SUGGESTIONS) -> dict:
     groups = list(dict.fromkeys(groups))
     if not groups:
@@ -476,8 +471,7 @@ def build_suggestions(universe, picks_info, exclude_symbols, group_key,
         target_betas = [p["beta"] if p.get("beta") is not None else NEUTRAL_BETA for p in picks_info]
         target_beta = sum(target_betas) / len(target_betas)
  
-    # group_key can be None -> "pure" mode with no sector/industry grouping,
-    # candidates are ranked across the whole universe instead.
+    #group_key can be None..."pure" mode with no sector/industry grouping...candidates are ranked across the whole universe instead.
     company_groups = [
         p[group_key] for p in picks_info
         if group_key and p.get(group_key)
@@ -530,8 +524,7 @@ def build_suggestions(universe, picks_info, exclude_symbols, group_key,
     return combined[:NUM_SUGGESTIONS]
  
  
-# (group_key, broad_funds, use_beta_filter) - order here is also the order the
-# mode buttons are drawn in, left to right.
+#(group_key, broad_funds, use_beta_filter): order here is the order the mode buttons are drawn in, left to right...least to most specifc
 MODE_LABELS = {
     "Beta (closest risk level)": (None, False, True),
     "Sector (overall)": ("sector", True, False),
@@ -547,7 +540,7 @@ def generate_suggestions(mode_choice, picks_info, exclude_symbols):
                               broad_funds=broad_funds, use_beta_filter=use_beta_filter)
  
  
-# FORMATTING
+#FORMATTING
  
 def picks_info_to_df(picks_info) -> pd.DataFrame:
     rows = []
@@ -581,10 +574,7 @@ def suggestions_to_df(suggestions) -> pd.DataFrame:
     return pd.DataFrame(rows)
  
  
-# ---------------------------------------------------------------------------
-# LLM EVALUATION (deliverable 1: remote HF API call / deliverable 2: local model)
-# ---------------------------------------------------------------------------
- 
+#LLM EVALUATION (remote HF API call / local model)
 def format_stock_block(items, title) -> str:
     """Deterministically formatted financial-data listing (ticker, company name,
     price, beta, sector, industry, market cap) built straight from the data we
@@ -626,7 +616,6 @@ def _format_symbol_list(items):
         )
     return "\n".join(lines) if lines else "(none)"
  
- 
 def build_evaluation_prompt(picks_info, all_suggestions, mode_choice) -> str:
     picks_block = format_stock_block(picks_info, "Your Selected Stocks/Funds")
     suggestions_block = format_stock_block(all_suggestions, "Suggested Stocks/Funds")
@@ -647,7 +636,6 @@ def build_evaluation_prompt(picks_info, all_suggestions, mode_choice) -> str:
         "level (beta) relative to the other symbols listed, and how much it overlaps "
         "with (or diversifies) the rest of the list."
     )
- 
  
 def parse_llm_reasoning(text: str, symbols) -> dict:
     """Pull each 'SYMBOL: ...' paragraph out of the model's free-form reply so it
@@ -694,8 +682,7 @@ def build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_tex
         parts.append(render_section(all_suggestions, "Suggested Stocks/Funds"))
  
     if not reasoning_by_symbol:
-        # Parsing found nothing usable — fall back to showing the raw reply so
-        # nothing is silently lost.
+        #Parsing found nothing usable...fall back to showing the raw reply so nothing is silently lost.
         parts.append("---\n" + raw_text)
  
     parts.append("Please remember that these are just suggestions and generalizations, "
@@ -731,9 +718,8 @@ def evaluate_locally(prompt: str) -> str:
     pipe, tokenizer = get_local_pipeline()
     messages = [{"role": "user", "content": prompt}]
  
-    # Qwen3 models "think" by default — they wrap hidden reasoning in
-    # <think>...</think> before the real answer, which can eat the whole
-    # token budget and leave the visible answer empty. Turn that off.
+    #Qwen3 models "think" by default...they wrap hidden reasoning in <think>...</think> before the real answer, which can eat the whole
+    #token budget and leave the visible answer empty. Turn that off.
     try:
         templated = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
@@ -749,11 +735,11 @@ def evaluate_locally(prompt: str) -> str:
         max_new_tokens=900,
         do_sample=True,
         temperature=0.7,
-        return_full_text=False,  # only the completion, not the echoed prompt
+        return_full_text=False,  #only completion, not an echoed prompt
     )
     text = output[0]["generated_text"]
  
-    # Belt-and-suspenders: strip any leftover <think> block that slipped through.
+    #Belt-and-suspenders: Used to strip any leftover <think> block that slipped through.
     if "</think>" in text:
         text = text.split("</think>", 1)[1]
     text = text.strip()
@@ -773,11 +759,13 @@ def evaluate_remotely(prompt: str, user_token: Optional[str]) -> str:
     token = (user_token or "").strip()
     if not token:
         raise RuntimeError(
-            "You're not logged in with Hugging Face. Click the 'Sign in with "
-            "Hugging Face' button above and try again — the remote evaluation "
-            "runs on your own account's usage/credits, not the Space owner's."
+            "not signed in with Hugging Face (click 'Sign in with Hugging "
+            "Face' above to use the remote model on your own account)"
         )
-    client = InferenceClient(model=REMOTE_MODEL, token=token)
+    # A short-ish timeout so an unresponsive/overloaded API is treated as a
+    # detectable failure (see run_evaluation's failover logic below) instead
+    # of hanging the request indefinitely.
+    client = InferenceClient(model=REMOTE_MODEL, token=token, timeout=30)
     completion = client.chat_completion(
         messages=[{"role": "user", "content": prompt}],
         max_tokens=900,
@@ -786,7 +774,15 @@ def evaluate_remotely(prompt: str, user_token: Optional[str]) -> str:
     return completion.choices[0].message.content.strip()
  
  
-def run_evaluation(state, backend_choice, oauth_token: Optional[gr.OAuthToken]):
+def run_evaluation(state, backend_choice, simulate_remote_failure,
+                    oauth_token: Optional[gr.OAuthToken]):
+    """
+    ADAPTIVE LLM FAILOVER (extra credit)
+    "Auto" mode always tries the remote Hugging Face API model first and if that call fails for ANY
+    reason like the visitor isn't signed in, the request times out and the API/model is unavailable, or a
+    rate limit is hit, program automatically falls back to the local model
+    instead of just showing an error
+    """
     picks_info = state.get("picks_info", [])
     all_suggestions = state.get("all_suggestions", [])
     mode_choice = state.get("mode", "")
@@ -797,23 +793,44 @@ def run_evaluation(state, backend_choice, oauth_token: Optional[gr.OAuthToken]):
  
     prompt = build_evaluation_prompt(picks_info, all_suggestions, mode_choice)
     all_symbols = [it.get("symbol") for it in (picks_info + all_suggestions) if it.get("symbol")]
+    user_token = getattr(oauth_token, "token", None)
  
+    def try_remote():
+        if simulate_remote_failure:
+            #Lets you demo/document the failover on demand instead of waiting for a real outage or rate limit to happen.
+            raise RuntimeError("simulated failure (demo mode) — pretending the remote API is unavailable")
+        return evaluate_remotely(prompt, user_token)
+ 
+    model_label = None
     try:
-        if backend_choice.startswith("Local"):
-            # Note: this always runs on the Space's own (ZeroGPU) hardware —
-            # there's no way for a hosted Space to redirect compute to a
-            # visitor's own machine. If that cost matters to you, duplicate
-            # the Space into your own account so the compute/quota used is
-            # yours instead of the original owner's.
+        if backend_choice.startswith("Local only"):
+            #This always runs on the Space's own (ZeroGPU) hardware...there's no way for a hosted Space to redirect compute to a
+            #visitor's own machine. If that cost matters to you, duplicate the Space into your own account so the compute/quota used is
+            #yours instead of the original owner's.
             raw_text = evaluate_locally(prompt)
-        else:
-            user_token = getattr(oauth_token, "token", None)
-            raw_text = evaluate_remotely(prompt, user_token)
+            model_label = f"Local ({LOCAL_MODEL})"
+ 
+        elif backend_choice.startswith("Hugging Face API only"):
+            raw_text = try_remote()
+            model_label = f"Hugging Face API ({REMOTE_MODEL})"
+ 
+        else:  #automatic failover, no manual model selection required
+            try:
+                raw_text = try_remote()
+                model_label = f"Hugging Face API ({REMOTE_MODEL}) — primary, no failover needed"
+            except Exception as remote_error:
+                print(f"[failover] remote model failed, switching to local automatically: {remote_error}")
+                raw_text = evaluate_locally(prompt)
+                model_label = (
+                    f"Local ({LOCAL_MODEL}) — AUTOMATIC FALLBACK "
+                    f"(remote Hugging Face API failed: {remote_error})"
+                )
+ 
         reasoning_by_symbol = parse_llm_reasoning(raw_text, all_symbols)
-        evaluation = build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_text, backend_choice)
+        evaluation = build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_text, model_label)
     except Exception as e:
         import traceback
-        traceback.print_exc()  # full stack trace in the Space's container logs
+        traceback.print_exc()  #full stack trace in the Space's container logs
         evaluation = (
             f"⚠️ Evaluation failed using {backend_choice}: {e}\n\n"
             "If you picked the Hugging Face API option, make sure you're signed "
@@ -823,8 +840,7 @@ def run_evaluation(state, backend_choice, oauth_token: Optional[gr.OAuthToken]):
             "terminal) for the full error."
         )
  
-    # Evaluation ends the suggestion loop: hide the mode buttons and lock the
-    # evaluation controls so no further suggestions or re-evaluations happen.
+    #Evaluation ends suggestion loop: hide the buttons and lock evaluation controls so no further suggestions or re-evaluations happen.
     return (
         evaluation,
         gr.update(visible=False),      # mode_buttons_row
@@ -833,7 +849,7 @@ def run_evaluation(state, backend_choice, oauth_token: Optional[gr.OAuthToken]):
     )
  
  
-# GRADIO CALLBACKS -----------------------------
+#GRADIO CALLBACKS:
  
 def resolve_picks(picks_text, progress=gr.Progress()):
     """Step 1: resolve the user's typed picks to real tickers and show them.
@@ -848,6 +864,7 @@ def resolve_picks(picks_text, progress=gr.Progress()):
             gr.update(visible=False),        # mode_buttons_row
             empty,                           # suggestions_table reset
             gr.update(visible=False),        # eval_backend
+            gr.update(visible=False),        # simulate_remote_failure
             gr.update(visible=False, interactive=True),  # eval_button
             "",                               # eval_output reset
         )
@@ -879,10 +896,10 @@ def resolve_picks(picks_text, progress=gr.Progress()):
         gr.update(visible=has_picks),   # mode_buttons_row: show once picks exist
         empty,                          # suggestions_table reset
         gr.update(visible=False),       # eval_backend: not until suggestions exist
+        gr.update(visible=False),       # simulate_remote_failure: not until suggestions exist
         gr.update(visible=False, interactive=True),  # eval_button
         "",                              # eval_output reset
     )
- 
  
 def add_suggestions(mode_choice, state, current_suggestions_df):
     """Step 2: clicking one of the mode buttons (under 'Your Picks') fetches
@@ -891,7 +908,7 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
     picks_info = state.get("picks_info", [])
     if not picks_info:
         return (current_suggestions_df, state,
-                gr.update(visible=False), gr.update(visible=False))
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
  
     exclude = set(state.get("exclude", []))
     more = generate_suggestions(mode_choice, picks_info, exclude)
@@ -912,96 +929,118 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
     has_suggestions = bool(state.get("all_suggestions"))
     return (
         combined, state,
-        gr.update(visible=has_suggestions),                    # eval_backend
-        gr.update(visible=has_suggestions, interactive=True),  # eval_button
+        gr.update(visible=has_suggestions),                     #eval_backend
+        gr.update(visible=has_suggestions),                     #simulate_remote_failure
+        gr.update(visible=has_suggestions, interactive=True),   #eval_button
     )
  
  
-# UI LAYOUT ---------------------
+# UI LAYOUT:
+#Wrapped in a function (instead of running at module import time) so that `import app` from a pytest test, or from another script
+#doesn't try to build the Gradio UI (and attach OAuth routes, which requires either a real Space or a local `huggingface-cli login`)
+#just to reach the plain Python functions above. The UI is only actually built when the app is run.
  
-with gr.Blocks(title="Stock Suggestor") as demo:
-    with gr.Sidebar():
+def build_demo() -> gr.Blocks:
+    with gr.Blocks(title="Stock Suggestor") as demo:
+        with gr.Sidebar():
+            gr.Markdown(
+                "Sign in to run the AI evaluation's **Hugging Face API** option on "
+                "your own account's usage/credits instead of the Space owner's."
+            )
+            gr.LoginButton()
+ 
         gr.Markdown(
-            "Sign in to run the AI evaluation's **Hugging Face API** option on "
-            "your own account's usage/credits instead of the Space owner's."
+            "# 📈 Stock Suggestor\n"
+            "1. Enter up to 5 stocks/funds — tickers, company names, or common nicknames "
+            "(e.g. `AAPL, google, tesla, SPY`) — or type **default** for a starter set.\n"
+            "2. Once your picks are resolved, choose a matching mode below them to pull "
+            "5 suggestions at a time — click any mode button again for 5 more.\n"
+            "3. When you're ready, evaluate everything with AI (this ends the round)."
         )
-        gr.LoginButton()
+        if DATA_LOAD_WARNING:
+            gr.Markdown(f"⚠️ {DATA_LOAD_WARNING}")
  
-    gr.Markdown(
-        "# 📈 Stock Suggestor\n"
-        "1. Enter up to 5 stocks/funds — tickers, company names, or common nicknames "
-        "(e.g. `AAPL, google, tesla, SPY`) — or type **default** for a starter set.\n"
-        "2. Once your picks are resolved, choose a matching mode below them to pull "
-        "5 suggestions at a time — click any mode button again for 5 more.\n"
-        "3. When you're ready, evaluate everything with AI (this ends the round)."
-    )
-    if DATA_LOAD_WARNING:
-        gr.Markdown(f"⚠️ {DATA_LOAD_WARNING}")
+        picks_input = gr.Textbox(
+            label="Your picks (comma-separated)",
+            placeholder="AAPL, google, tesla, SPY, default...",
+        )
+        resolve_button = gr.Button("Get My Picks", variant="primary")
+        status = gr.Markdown()
  
-    picks_input = gr.Textbox(
-        label="Your picks (comma-separated)",
-        placeholder="AAPL, google, tesla, SPY, default...",
-    )
-    resolve_button = gr.Button("Get My Picks", variant="primary")
-    status = gr.Markdown()
- 
-    gr.Markdown("### Your Picks")
-    picks_table = gr.Dataframe(
-        headers=["Symbol", "Name", "Price", "Beta", "Sector", "Industry", "Match note"],
-        max_height=220,  # fixed height -> internally scrollable once it overflows
-        wrap=True,
-    )
- 
-    gr.Markdown("### Suggest by (click a mode to add 5 suggestions; click again for 5 more)")
-    with gr.Row(visible=False) as mode_buttons_row:
-        mode_buttons = {label: gr.Button(label) for label in MODE_LABELS}
- 
-    gr.Markdown("### Suggestions")
-    suggestions_table = gr.Dataframe(
-        headers=["Symbol", "Name", "Type", "Sector", "Industry", "Beta"],
-        max_height=420,  # scrollable results panel
-        wrap=True,
-    )
- 
-    gr.Markdown(
-        "### AI Portfolio Evaluation\n"
-        "**Hugging Face API** option: runs using Hugging Face — click 'Sign in with Hugging Face' in the sidebar first.\n\n"
-        "**Local** option: runs on this Space's own hardware"
-    )
-    eval_backend = gr.Radio(
-        choices=[f"Local ({LOCAL_MODEL})", f"Hugging Face API ({REMOTE_MODEL})"],
-        value=f"Local ({LOCAL_MODEL})",
-        label="Run evaluation using",
-        visible=False,
-    )
-    eval_button = gr.Button("🤖 Evaluate picks with AI (ends this round)", visible=False)
-    eval_output = gr.Markdown()
- 
-    session_state = gr.State({})
- 
-    resolve_button.click(
-        fn=resolve_picks,
-        inputs=[picks_input],
-        outputs=[picks_table, session_state, status,
-                 mode_buttons_row, suggestions_table, eval_backend, eval_button,
-                 eval_output],
-    )
- 
-    for label, btn in mode_buttons.items():
-        btn.click(
-            fn=partial(add_suggestions, label),
-            inputs=[session_state, suggestions_table],
-            outputs=[suggestions_table, session_state, eval_backend, eval_button],
+        gr.Markdown("### Your Picks")
+        picks_table = gr.Dataframe(
+            headers=["Symbol", "Name", "Price", "Beta", "Sector", "Industry", "Match note"],
+            max_height=220,  # fixed height -> internally scrollable once it overflows
+            wrap=True,
         )
  
-    # Note: oauth_token is intentionally NOT in `inputs=` — Gradio auto-injects
-    # the signed-in visitor's Hugging Face OAuthToken into any handler argument
-    # annotated as gr.OAuthToken, the same way `gr.Request` is auto-injected.
-    eval_button.click(
-        fn=run_evaluation,
-        inputs=[session_state, eval_backend],
-        outputs=[eval_output, mode_buttons_row, eval_button, eval_backend],
-    )
+        gr.Markdown("### Suggest by (click a mode to add 5 suggestions; click again for 5 more)")
+        with gr.Row(visible=False) as mode_buttons_row:
+            mode_buttons = {label: gr.Button(label) for label in MODE_LABELS}
+ 
+        gr.Markdown("### Suggestions")
+        suggestions_table = gr.Dataframe(
+            headers=["Symbol", "Name", "Type", "Sector", "Industry", "Beta"],
+            max_height=420,  # scrollable results panel
+            wrap=True,
+        )
+ 
+        gr.Markdown(
+            "### AI Portfolio Evaluation\n"
+            "**Auto** (default): tries the Hugging Face API model first and automatically "
+            "switches to the local model if the remote call fails for any reason (not signed "
+            "in, timeout, rate limit, API unavailable) — no manual re-selection needed. It "
+            "retries the remote model fresh on every click, so it automatically switches back "
+            "once the remote model is available again.\n\n"
+            "**Local only / Hugging Face API only**: manual overrides for testing or demoing "
+            "one path in isolation — these do NOT fail over."
+        )
+        eval_backend = gr.Radio(
+            choices=[
+                "Auto (recommended — automatic failover)",
+                f"Local only ({LOCAL_MODEL})",
+                f"Hugging Face API only ({REMOTE_MODEL})",
+            ],
+            value="Auto (recommended — automatic failover)",
+            label="Run evaluation using",
+            visible=False,
+        )
+        simulate_remote_failure = gr.Checkbox(
+            label="🧪 Simulate a remote-API failure (demo/testing only, forces Auto mode to fail over)",
+            value=False,
+            visible=False,
+        )
+        eval_button = gr.Button("🤖 Evaluate picks with AI (ends this round)", visible=False)
+        eval_output = gr.Markdown()
+ 
+        session_state = gr.State({})
+ 
+        resolve_button.click(
+            fn=resolve_picks,
+            inputs=[picks_input],
+            outputs=[picks_table, session_state, status,
+                     mode_buttons_row, suggestions_table, eval_backend,
+                     simulate_remote_failure, eval_button, eval_output],
+        )
+ 
+        for label, btn in mode_buttons.items():
+            btn.click(
+                fn=partial(add_suggestions, label),
+                inputs=[session_state, suggestions_table],
+                outputs=[suggestions_table, session_state, eval_backend,
+                         simulate_remote_failure, eval_button],
+            )
+ 
+        #Oauth_token is intentionally NOT in `inputs=` — Gradio auto-injects the signed-in visitor's Hugging Face OAuthToken into any
+        #handler argument annotated as gr.OAuthToken, the same way `gr.Request` is auto-injected.
+        eval_button.click(
+            fn=run_evaluation,
+            inputs=[session_state, eval_backend, simulate_remote_failure],
+            outputs=[eval_output, mode_buttons_row, eval_button, eval_backend],
+        )
+ 
+    return demo
+ 
  
 if __name__ == "__main__":
-    demo.launch()
+    build_demo().launch()
