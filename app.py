@@ -9,7 +9,7 @@ from typing import Optional
 import pandas as pd
 from pathlib import Path
 import gradio as gr
-import spaces
+##import spaces
  
 try:
     import yfinance as yf
@@ -712,7 +712,7 @@ def get_local_pipeline():
     return _local_pipe, _local_tokenizer
  
  
-@spaces.GPU(duration=120)  # give a cold model download + generation enough time
+## @spaces.GPU(duration=120)  # give a cold model download + generation enough time
 def evaluate_locally(prompt: str) -> str:
     """Run the evaluation on the Space's own (ZeroGPU) compute — no remote API call."""
     pipe, tokenizer = get_local_pipeline()
