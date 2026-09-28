@@ -1,7 +1,7 @@
 gradio==6.26.0
 pandas>=2.0.0
 yfinance>=0.2.40
-spaces
+##spaces
 transformers>=4.45.0
 torch>=2.2.0
 huggingface_hub>=0.25.0
