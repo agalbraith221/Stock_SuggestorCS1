@@ -9,7 +9,12 @@ from typing import Optional
 import pandas as pd
 from pathlib import Path
 import gradio as gr
-##import spaces
+ 
+# `spaces` (Hugging Face Spaces' ZeroGPU scheduler) only exists - and only
+# works - inside an actual HF Space. On a plain VM either the import itself
+# can fail, or calling .launch() later triggers a ZeroGPU handshake that
+# errors out. Fall back to a no-op decorator so this file runs unmodified
+# both on a Space and on a regular server.
 try:
     import spaces
 except Exception:
@@ -165,7 +170,7 @@ def _gpu_startup_stub():
  
  
 #DATA LOADING:
-
+ 
 def safe_str(value, default="N/A") -> str:
     if value is None:
         return default
@@ -955,11 +960,24 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
 def build_demo() -> gr.Blocks:
     with gr.Blocks(title="Stock Suggestor") as demo:
         with gr.Sidebar():
-            gr.Markdown(
-                "Sign in to run the AI evaluation's **Hugging Face API** option on "
-                "your own account's usage/credits instead of the Space owner's."
-            )
-            gr.LoginButton()
+            # gr.LoginButton() only works in two situations: (1) inside a
+            # real HF Space, where Spaces itself provides OAuth, or (2) on a
+            # machine that's run `huggingface-cli login` / has HF_TOKEN set,
+            # which Gradio uses to *mock* the login locally for debugging.
+            # On a plain VM with neither, attach_oauth() raises and the
+            # whole app fails to start - so only add the button when one of
+            # those is actually true; otherwise fall back to a plain note.
+            if os.environ.get("SPACE_ID") or os.environ.get("HF_TOKEN"):
+                gr.Markdown(
+                    "Sign in to run the AI evaluation's **Hugging Face API** option on "
+                    "your own account's usage/credits instead of the Space owner's."
+                )
+                gr.LoginButton()
+            else:
+                gr.Markdown(
+                    "_Hugging Face sign-in isn't available in this deployment - "
+                    "AI evaluation will use the local model instead._"
+                )
  
         gr.Markdown(
             "# 📈 Stock Suggestor\n"
@@ -1055,7 +1073,11 @@ def build_demo() -> gr.Blocks:
  
  
 if __name__ == "__main__":
- # Gradio defaults to 127.0.0.1, which is only reachable from inside the VM itself.
+    # Gradio defaults to 127.0.0.1, which is only reachable from inside the
+    # VM itself. Bind to all interfaces (and an explicit port) so it's
+    # actually reachable from outside once the VM's firewall/port-forwarding
+    # allows it. Both are overridable via env vars set in the deploy script.
     host = os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0")
     port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
     build_demo().launch(server_name=host, server_port=port)
+ 
