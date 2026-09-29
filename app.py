@@ -9,7 +9,19 @@ from typing import Optional
 import pandas as pd
 from pathlib import Path
 import gradio as gr
-import spaces
+##import spaces
+try:
+    import spaces
+except Exception:
+    class _SpacesShim:
+        @staticmethod
+        def GPU(*args, **kwargs):
+            if args and callable(args[0]) and not kwargs:
+                return args[0]
+            def _decorator(fn):
+                return fn
+            return _decorator
+    spaces = _SpacesShim()
  
 try:
     import yfinance as yf
@@ -153,7 +165,7 @@ def _gpu_startup_stub():
  
  
 #DATA LOADING:
- 
+
 def safe_str(value, default="N/A") -> str:
     if value is None:
         return default
@@ -1043,4 +1055,7 @@ def build_demo() -> gr.Blocks:
  
  
 if __name__ == "__main__":
-    build_demo().launch()
+ # Gradio defaults to 127.0.0.1, which is only reachable from inside the VM itself.
+    host = os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0")
+    port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
+    build_demo().launch(server_name=host, server_port=port)
