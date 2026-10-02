@@ -128,7 +128,7 @@ fi
 #    it's obvious where things are if this hangs or fails partway through.
 # ---------------------------------------------------------------------------
 log "Starting the app: step 1/4 - launching the process..."
-remote "cd ${REPO_NAME} && nohup venv/bin/python3 app.py > log.txt 2>&1 & echo \$! > ${REPO_NAME}/app.pid"
+remote "cd ${REPO_NAME}; nohup venv/bin/python3 app.py > log.txt 2>&1 < /dev/null & echo \$! > app.pid"
 push_rollback "${RSH[*]} 'if [ -f ${REPO_NAME}/app.pid ]; then kill \$(cat ${REPO_NAME}/app.pid) 2>/dev/null; rm -f ${REPO_NAME}/app.pid; fi' || true"
  
 APP_PID="$(remote "cat ${REPO_NAME}/app.pid" 2>/dev/null || true)"
