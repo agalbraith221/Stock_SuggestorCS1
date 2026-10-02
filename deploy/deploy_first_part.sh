@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
  
 STUDENT_ADMIN_KEY_PATH="${STUDENT_ADMIN_KEY_PATH:-$HOME/Desktop}"
-REPO_URL="https://github.com/agalbraith221/Stock_SuggestorCS1/tree/CS2.git"
+REPO_URL="https://github.com/agalbraith221/Stock_SuggestorCS1.git"
 REPO_NAME="Stock_SuggestorCS1"
 BRANCH="${BRANCH:-CS2}"
  
