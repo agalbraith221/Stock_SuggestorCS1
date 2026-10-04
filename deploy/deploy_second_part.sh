@@ -15,6 +15,10 @@
 #   - After starting, we health-check the process is actually alive; if
 #     not, we roll back (remove the venv we just built, if any) and exit
 #     non-zero instead of silently leaving a broken deployment.
+#   - If the health checks cannot reach the VM at all (DNS/network trouble),
+#     that is NOT treated as a dead app: nothing is rolled back (the app may
+#     be running fine) and the script exits with status 3 = "launched, but
+#     could not be verified". The watchdog verifies on its next run.
 #
 set -uo pipefail
  
@@ -73,6 +77,8 @@ remote "
         kill \$(cat ${REPO_NAME}/app.pid)
         sleep 1
     fi
+    pkill -f '[v]env/bin/python3 app.py' 2>/dev/null || true
+    sleep 1
     rm -f ${REPO_NAME}/app.pid
 "
  
@@ -144,19 +150,36 @@ HEALTH_CHECK_ATTEMPTS=10
 HEALTH_CHECK_INTERVAL=3
 log "Starting the app: step 3/4 - waiting for it to come up (checking every ${HEALTH_CHECK_INTERVAL}s, up to ${HEALTH_CHECK_ATTEMPTS} times)..."
  
+# ssh exits with 255 when it cannot connect at all (DNS failure, timeout,
+# network outage). That says nothing about the app, so it is counted
+# separately from "the app is not running".
 APP_ALIVE=0
+CONN_FAILURES=0
 for attempt in $(seq 1 "${HEALTH_CHECK_ATTEMPTS}"); do
     sleep "${HEALTH_CHECK_INTERVAL}"
-    if remote "kill -0 \$(cat ${REPO_NAME}/app.pid) 2>/dev/null"; then
+    rc=0
+    "${RSH[@]}" "kill -0 \$(cat ${REPO_NAME}/app.pid) 2>/dev/null" || rc=$?
+    if [ "${rc}" -eq 0 ]; then
         log "  check ${attempt}/${HEALTH_CHECK_ATTEMPTS}: still running."
         APP_ALIVE=1
         break
+    elif [ "${rc}" -eq 255 ]; then
+        CONN_FAILURES=$((CONN_FAILURES + 1))
+        log "  check ${attempt}/${HEALTH_CHECK_ATTEMPTS}: could not reach the VM (network/DNS problem) - says nothing about the app."
     else
         log "  check ${attempt}/${HEALTH_CHECK_ATTEMPTS}: not running yet or already died."
     fi
 done
  
 log "Starting the app: step 4/4 - verifying final status..."
+if [ "${APP_ALIVE}" -eq 0 ] && [ "${CONN_FAILURES}" -eq "${HEALTH_CHECK_ATTEMPTS}" ]; then
+    # Not one health check got an answer, so we cannot say the app failed.
+    # Do NOT roll back: that would kill an app that may be running fine.
+    disarm_rollback
+    err "App launched (PID ${APP_PID:-unknown}) but the VM could not be reached for any of the ${HEALTH_CHECK_ATTEMPTS} health checks."
+    err "Leaving it running; the next watchdog run will verify it."
+    exit 3
+fi
 if [ "${APP_ALIVE}" -eq 0 ]; then
     err "App process died (or never came up) after ${HEALTH_CHECK_ATTEMPTS} checks. Last lines of log.txt:"
     remote "tail -n 20 ${REPO_NAME}/log.txt" || true
