@@ -32,7 +32,7 @@ REMOTE_MODEL = "openai/gpt-oss-20b"
 # G17_StockSuggestor  = container 1 (API-based product)
 # G17_StockSuggestor2 = container 2 (locally executed product)
 # Same file for both: run container 2 with -e PRODUCT_NAME=G17_StockSuggestor2
-PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "G17_StockSuggestor")
+PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "g17_stocksuggestor")
 APP_INFO.info({"product": PRODUCT_NAME})
  
 pipe = pipeline(
