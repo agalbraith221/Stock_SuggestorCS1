@@ -35,18 +35,6 @@ REMOTE_MODEL = "openai/gpt-oss-20b"
 PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "G17_StockSuggestor")
 APP_INFO.info({"product": PRODUCT_NAME})
  
-# --- Ports: my claimed range on the shared VM is 1700-1779 ---
-# Defaults below are inside that range. To run a second container (e.g. API-only
-# and local-only products side by side) override them with env vars, e.g.
-#   GRADIO_SERVER_PORT=1710 METRICS_PORT=1711
-PORT_RANGE = range(1700, 1780)
-APP_PORT = int(os.environ.get("GRADIO_SERVER_PORT", "1700"))
-METRICS_PORT = int(os.environ.get("METRICS_PORT", "1701"))
-for _name, _port in (("GRADIO_SERVER_PORT", APP_PORT), ("METRICS_PORT", METRICS_PORT)):
-    if _port not in PORT_RANGE:
-        print(f"[warning] {_name}={_port} is outside the claimed range 1700-1779")
- 
- 
 pipe = pipeline(
     "text-generation",
     model=LOCAL_MODEL,
@@ -1173,10 +1161,9 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
  
  
 if __name__ == "__main__":
-    # Expose Prometheus metrics at :METRICS_PORT/metrics (default 1701)
-    start_http_server(METRICS_PORT)
+    start_http_server(8000)
     demo.launch(
         server_name="0.0.0.0",
-        server_port=APP_PORT,
+        server_port=7860,
     )
  
