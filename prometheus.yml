@@ -1,20 +1,7 @@
 global:
   scrape_interval: 15s
- 
-# Targets use Docker container names, so Prometheus must be on the same Docker
-# network as both product containers (e.g. docker network create g17_net, then
-# --network g17_net on every container). Ports are the in-container ports.
-scrape_configs:
-  # --- Container 1: API-based product ---
-  - job_name: 'G17_StockSuggestor_app'
-    static_configs:
-      - targets: ['G17_StockSuggestor:1701']
- 
-  - job_name: 'G17_StockSuggestor_node'
-    static_configs:
-      - targets: ['G17_StockSuggestor:9100']
- 
-  # --- Container 2: locally executed product ---
+
+# --- locally executed product ---
   - job_name: 'G17_StockSuggestor2_app'
     static_configs:
       - targets: ['G17_StockSuggestor2:1711']
