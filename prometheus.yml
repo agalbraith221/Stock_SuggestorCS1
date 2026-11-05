@@ -4,7 +4,7 @@ global:
 # --- locally executed product ---
   - job_name: 'g17_stocksuggestor2_app'
     static_configs:
-      - targets: ['g17_stocksuggestor2:1711']
+      - targets: ['g17_stocksuggestor2:8000']
  
   - job_name: 'g17_stocksuggestor2_node'
     static_configs:
