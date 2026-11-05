@@ -4,7 +4,7 @@ global:
 scrape_configs:
   - job_name: 'g17_stocksuggestor_app'
     static_configs:
-      - targets: ['g17_Stocksuggestor:1701']
+      - targets: ['g17_stocksuggestor:8000']
  
   - job_name: 'g17_stocksuggestor_node'
     static_configs:
