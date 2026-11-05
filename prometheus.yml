@@ -2,10 +2,10 @@ global:
   scrape_interval: 15s
 
 # --- locally executed product ---
-  - job_name: 'G17_StockSuggestor2_app'
+  - job_name: 'g17_stocksuggestor2_app'
     static_configs:
-      - targets: ['G17_StockSuggestor2:1711']
+      - targets: ['g17_stocksuggestor2:1711']
  
-  - job_name: 'G17_StockSuggestor2_node'
+  - job_name: 'g17_stocksuggestor2_node'
     static_configs:
-      - targets: ['G17_StockSuggestor2:9100']
+      - targets: ['g17_stocksuggestor2:9100']
