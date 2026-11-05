@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'G17_StockSuggestor_app'
+    static_configs:
+      - targets: ['G17_StockSuggestor:1701']
+ 
+  - job_name: 'G17_StockSuggestor_node'
+    static_configs:
+      - targets: ['G17_StockSuggestor:9100']
