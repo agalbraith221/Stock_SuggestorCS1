@@ -26,8 +26,8 @@ ENV GRADIO_SERVER_NAME="0.0.0.0"
 ENV GRADIO_SERVER_PORT=1700
 ENV METRICS_PORT=1701
  
-EXPOSE 1700
-EXPOSE 1701
+EXPOSE 7860
+EXPOSE 8000
 EXPOSE 9100
  
 CMD bash -c "prometheus-node-exporter --web.listen-address=':9100' & exec python /opt/app/app.py"
