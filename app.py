@@ -245,6 +245,8 @@ DATA_LOAD_WARNING = (
     "nyse_full_tickers.csv (columns: symbol, name, sector, industry, marketCap) "
     "to enable industry/sector matching. Fund/index picks like SPY or ^GSPC still work."
 ) if UNIVERSE.empty else ""
+print(f"[startup] ticker universe: {len(UNIVERSE)} rows loaded "
+      f"from {[str(p) for p in TICKER_CSVS if p.exists()]}")
  
  
 # --- MATCHING ---
@@ -807,7 +809,13 @@ def remote_generate(
         temperature=temperature,
         top_p=top_p,
     )
-    return (completion.choices[0].message.content or "").strip()
+    text = (completion.choices[0].message.content or "").strip()
+    if not text:
+        raise RuntimeError(
+            "The API model returned an empty response (a reasoning model can use "
+            "its whole token budget thinking). Raise 'Max new tokens' and try again."
+        )
+    return text
  
  
 def run_evaluation(
@@ -829,6 +837,7 @@ def run_evaluation(
     """
     REQUEST_COUNTER.inc()
     start_t = time.perf_counter()
+    succeeded = False
     try:
         picks_info = state.get("picks_info", [])
         all_suggestions = state.get("all_suggestions", [])
@@ -876,6 +885,7 @@ def run_evaluation(
         reasoning_by_symbol = parse_llm_reasoning(raw_text, all_symbols)
         evaluation = build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_text, model_label)
         SUCCESSFUL_REQUESTS.inc()
+        succeeded = True
     except Exception as e:
         FAILED_REQUESTS.inc()
         evaluation = (
@@ -887,8 +897,15 @@ def run_evaluation(
     finally:
         REQUEST_DURATION.observe(time.perf_counter() - start_t)
  
-    # Evaluation ends the suggestion loop: hide the buttons and lock evaluation
-    # controls so no further suggestions or re-evaluations happen.
+    if not succeeded:
+        # A FAILED evaluation must not end the loop: leave every control as it is so
+        # the user can fix the problem (e.g. enter a token) and retry, or keep
+        # pulling suggestions.
+        return (evaluation, gr.update(), gr.update(), gr.update())
+ 
+    # The user chose to evaluate (with the API model, the local model, or Auto):
+    # that choice is what ENDS the suggestion loop. Hide the mode buttons and lock
+    # the evaluation controls until they start a new round with "Get My Picks".
     return (
         evaluation,
         gr.update(visible=False),      # mode_buttons_row
@@ -925,9 +942,8 @@ def resolve_picks(picks_text, progress=gr.Progress()):
             empty, state, DATA_LOAD_WARNING,
             gr.update(visible=False),        # mode_buttons_row
             empty,                           # suggestions_table reset
-            gr.update(visible=False),        # eval_backend
-            gr.update(visible=False),        # simulate_remote_failure
-            gr.update(visible=False, interactive=True),  # eval_button
+            gr.update(interactive=False),    # eval_backend: locked until suggestions exist
+            gr.update(interactive=False),    # eval_button: locked until suggestions exist
             "",                              # eval_output reset
         )
  
@@ -957,9 +973,8 @@ def resolve_picks(picks_text, progress=gr.Progress()):
         picks_info_to_df(picks_info), state, warning,
         gr.update(visible=has_picks),   # mode_buttons_row: show once picks exist
         empty,                          # suggestions_table reset
-        gr.update(visible=False),       # eval_backend: not until suggestions exist
-        gr.update(visible=False),       # simulate_remote_failure: not until suggestions exist
-        gr.update(visible=False, interactive=True),  # eval_button
+        gr.update(interactive=False),   # eval_backend: locked until suggestions exist
+        gr.update(interactive=False),   # eval_button: locked until suggestions exist
         "",                             # eval_output reset
     )
  
@@ -971,7 +986,7 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
     picks_info = state.get("picks_info", [])
     if not picks_info:
         return (current_suggestions_df, state,
-                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
+                gr.update(interactive=False), gr.update(interactive=False))
  
     exclude = set(state.get("exclude", []))
     more = generate_suggestions(mode_choice, picks_info, exclude)
@@ -992,9 +1007,8 @@ def add_suggestions(mode_choice, state, current_suggestions_df):
     has_suggestions = bool(state.get("all_suggestions"))
     return (
         combined, state,
-        gr.update(visible=has_suggestions),                     # eval_backend
-        gr.update(visible=has_suggestions),                     # simulate_remote_failure
-        gr.update(visible=has_suggestions, interactive=True),   # eval_button
+        gr.update(interactive=has_suggestions),                 # eval_backend
+        gr.update(interactive=has_suggestions),                 # eval_button
     )
  
  
@@ -1103,6 +1117,12 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
             "every click.\n\n"
             "**Local only / Hugging Face API only**: manual overrides — these do NOT fail over."
         )
+        # The evaluation controls are always on the page and just LOCKED (interactive=False)
+        # until there is at least one suggestion. (Show/hide toggling of these controls
+        # was unreliable in Gradio 6: they only appeared after a later click, or the
+        # Evaluate button never appeared at all.) Pulling suggestions repeatedly is the
+        # loop; clicking Evaluate -- with whichever model you pick -- is the choice that
+        # ends it.
         eval_backend = gr.Radio(
             choices=[
                 "Auto (recommended — automatic failover)",
@@ -1111,14 +1131,17 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
             ],
             value="Auto (recommended — automatic failover)",
             label="Run evaluation using",
-            visible=False,
+            interactive=False,
         )
         simulate_remote_failure = gr.Checkbox(
             label="🧪 Simulate a remote-API failure (demo/testing only, forces Auto mode to fail over)",
             value=False,
-            visible=False,
         )
-        eval_button = gr.Button("🤖 Evaluate picks with AI (ends this round)", visible=False)
+        eval_button = gr.Button(
+            "🤖 Evaluate picks with AI (ends this round)",
+            variant="primary",
+            interactive=False,
+        )
         eval_output = gr.Markdown()
  
         gr.Markdown(
@@ -1140,16 +1163,15 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
         fn=resolve_picks,
         inputs=[picks_input],
         outputs=[picks_table, session_state, status,
-                 mode_buttons_row, suggestions_table, eval_backend,
-                 simulate_remote_failure, eval_button, eval_output],
+                 mode_buttons_row, suggestions_table,
+                 eval_backend, eval_button, eval_output],
     )
  
     for label, btn in mode_buttons.items():
         btn.click(
             fn=partial(add_suggestions, label),
             inputs=[session_state, suggestions_table],
-            outputs=[suggestions_table, session_state, eval_backend,
-                     simulate_remote_failure, eval_button],
+            outputs=[suggestions_table, session_state, eval_backend, eval_button],
         )
  
     eval_button.click(
