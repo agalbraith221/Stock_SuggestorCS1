@@ -9,7 +9,7 @@ from pathlib import Path
 import gradio as gr
 import pandas as pd
 from huggingface_hub import HfApi, InferenceClient
-from transformers import pipeline
+## from transformers import pipeline
 from prometheus_client import start_http_server, Counter, Summary, Info
  
 try:
@@ -25,7 +25,7 @@ FAILED_REQUESTS = Counter('app_failed_requests_total', 'Total number of failed r
 REQUEST_DURATION = Summary('app_request_duration_seconds', 'Time spent processing request')
 APP_INFO = Info('app', 'Which product/container is producing these metrics')
  
-LOCAL_MODEL = "Qwen/Qwen3-0.6B"
+## LOCAL_MODEL = "Qwen/Qwen3-0.6B"
 REMOTE_MODEL = "openai/gpt-oss-20b"
  
 # --- Container / product name ---
@@ -35,12 +35,12 @@ REMOTE_MODEL = "openai/gpt-oss-20b"
 PRODUCT_NAME = os.environ.get("PRODUCT_NAME", "g17_stocksuggestor")
 APP_INFO.info({"product": PRODUCT_NAME})
  
-pipe = pipeline(
-    "text-generation",
-    model=LOCAL_MODEL,
-    dtype="auto",
-    device="cpu",
-)
+##pipe = pipeline(
+##    "text-generation",
+##    model=LOCAL_MODEL,
+##    dtype="auto",
+##    device="cpu",
+##)
  
  
 DATA_DIR = Path(__file__).parent / "data"
