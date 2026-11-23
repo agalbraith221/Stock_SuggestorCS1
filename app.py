@@ -633,7 +633,7 @@ def suggestions_to_df(suggestions) -> pd.DataFrame:
     return pd.DataFrame(rows)
  
  
-# --- LLM EVALUATION (remote HF API call / local model) ---
+# --- LLM EVALUATION (remote HF API call) ---
  
 def format_stock_block(items, title) -> str:
     """Deterministically formatted financial-data listing (ticker, company name,
@@ -736,49 +736,49 @@ def build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_tex
     return "\n\n".join(parts)
  
  
-def local_generate(
-    prompt,
-    system_message,
-    max_tokens,
-    temperature,
-    top_p,
-):
-    messages = [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": prompt},
-    ]
+##def local_generate(
+##    prompt,
+##    system_message,
+##    max_tokens,
+##    temperature,
+##    top_p,
+##):
+##    messages = [
+##        {"role": "system", "content": system_message},
+##        {"role": "user", "content": prompt},
+##    ]
  
-    # Qwen3 models "think" by default (<think>...</think>), which can eat the
-    # whole token budget and leave the visible answer empty. Turn that off.
-    try:
-        templated = pipe.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
-        )
-    except TypeError:
-        templated = pipe.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-        )
+##    # Qwen3 models "think" by default (<think>...</think>), which can eat the
+##    # whole token budget and leave the visible answer empty. Turn that off.
+##    try:
+##        templated = pipe.tokenizer.apply_chat_template(
+##            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+##        )
+##    except TypeError:
+##        templated = pipe.tokenizer.apply_chat_template(
+##            messages, tokenize=False, add_generation_prompt=True,
+##        )
  
-    outputs = pipe(
-        templated,
-        max_new_tokens=int(max_tokens),
-        do_sample=True,
-        temperature=temperature,
-        top_p=top_p,
-        return_full_text=False,
-    )
-    text = outputs[0]["generated_text"]
+##    outputs = pipe(
+##        templated,
+##        max_new_tokens=int(max_tokens),
+##        do_sample=True,
+##        temperature=temperature,
+##        top_p=top_p,
+##        return_full_text=False,
+##    )
+##    text = outputs[0]["generated_text"]
  
-    if "</think>" in text:
-        text = text.split("</think>", 1)[1]
-    text = text.strip()
+##    if "</think>" in text:
+##        text = text.split("</think>", 1)[1]
+##    text = text.strip()
  
-    if not text:
-        raise RuntimeError(
-            "The local model returned an empty response — it may have used its "
-            "entire token budget on internal reasoning. Try again."
-        )
-    return text
+##    if not text:
+##        raise RuntimeError(
+##            "The local model returned an empty response — it may have used its "
+##            "entire token budget on internal reasoning. Try again."
+##        )
+##    return text
  
  
 def remote_generate(
@@ -794,7 +794,7 @@ def remote_generate(
         raise RuntimeError("⚠️ Please enter your Hugging Face token first.")
  
     # Short timeout so an unresponsive/overloaded API is a detectable failure
-    # (Auto mode then falls back to the local model) instead of hanging.
+    # instead of hanging.
     client = InferenceClient(
         token=token,
         model=REMOTE_MODEL,
@@ -821,7 +821,7 @@ def remote_generate(
 def run_evaluation(
     state,
     backend_choice,
-    simulate_remote_failure,
+##    simulate_remote_failure,
     hf_token,
     system_message,
     max_tokens,
@@ -829,11 +829,8 @@ def run_evaluation(
     top_p,
 ):
     """
-    ADAPTIVE LLM FAILOVER
-    "Auto" mode always tries the remote Hugging Face API model first and, if that
-    call fails for ANY reason (no token, timeout, rate limit, API unavailable),
-    automatically falls back to the local model instead of just showing an error.
-    "Local only" / "Hugging Face API only" are manual overrides that do NOT fail over.
+    Runs the evaluation with the remote Hugging Face API model.
+    (Local model and Auto failover are disabled in this version.)
     """
     REQUEST_COUNTER.inc()
     start_t = time.perf_counter()
@@ -852,35 +849,35 @@ def run_evaluation(
         all_symbols = [it.get("symbol") for it in (picks_info + all_suggestions) if it.get("symbol")]
  
         def try_remote():
-            if simulate_remote_failure:
-                # Lets you demo the failover on demand instead of waiting for a real outage.
-                raise RuntimeError("simulated failure (demo mode) — pretending the remote API is unavailable")
+##            if simulate_remote_failure:
+##                # Lets you demo the failover on demand instead of waiting for a real outage.
+##                raise RuntimeError("simulated failure (demo mode) — pretending the remote API is unavailable")
             print("[MODE] api")
             return remote_generate(prompt, system_message, max_tokens, temperature, top_p, hf_token)
  
-        def try_local():
-            print("[MODE] local")
-            return local_generate(prompt, system_message, max_tokens, temperature, top_p)
+##        def try_local():
+##            print("[MODE] local")
+##            return local_generate(prompt, system_message, max_tokens, temperature, top_p)
  
-        if backend_choice.startswith("Local only"):
-            raw_text = try_local()
-            model_label = f"Local ({LOCAL_MODEL})"
+##        if backend_choice.startswith("Local only"):
+##            raw_text = try_local()
+##            model_label = f"Local ({LOCAL_MODEL})"
  
-        elif backend_choice.startswith("Hugging Face API only"):
-            raw_text = try_remote()
-            model_label = f"Hugging Face API ({REMOTE_MODEL})"
+##        elif backend_choice.startswith("Hugging Face API only"):
+        raw_text = try_remote()
+        model_label = f"Hugging Face API ({REMOTE_MODEL})"
  
-        else:  # Auto: automatic failover, no manual model selection required
-            try:
-                raw_text = try_remote()
-                model_label = f"Hugging Face API ({REMOTE_MODEL}) — primary, no failover needed"
-            except Exception as remote_error:
-                print(f"[failover] remote model failed, switching to local automatically: {remote_error}")
-                raw_text = try_local()
-                model_label = (
-                    f"Local ({LOCAL_MODEL}) — AUTOMATIC FALLBACK "
-                    f"(remote Hugging Face API failed: {remote_error})"
-                )
+##        else:  # Auto: automatic failover, no manual model selection required
+##            try:
+##                raw_text = try_remote()
+##                model_label = f"Hugging Face API ({REMOTE_MODEL}) — primary, no failover needed"
+##            except Exception as remote_error:
+##                print(f"[failover] remote model failed, switching to local automatically: {remote_error}")
+##                raw_text = try_local()
+##                model_label = (
+##                    f"Local ({LOCAL_MODEL}) — AUTOMATIC FALLBACK "
+##                    f"(remote Hugging Face API failed: {remote_error})"
+##                )
  
         reasoning_by_symbol = parse_llm_reasoning(raw_text, all_symbols)
         evaluation = build_final_report(picks_info, all_suggestions, reasoning_by_symbol, raw_text, model_label)
@@ -890,9 +887,8 @@ def run_evaluation(
         FAILED_REQUESTS.inc()
         evaluation = (
             f"Error: {e}\n\n"
-            f"Evaluation failed using {backend_choice}. If you picked the Hugging Face "
-            "API option, enter and validate your token above. If you picked Local, "
-            "make sure there's enough memory available."
+            f"Evaluation failed using {backend_choice}. Enter and validate your "
+            "Hugging Face token above."
         )
     finally:
         REQUEST_DURATION.observe(time.perf_counter() - start_t)
@@ -1022,7 +1018,7 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
  
     gr.Markdown(
         "Pick up to 5 stocks/funds, pull suggestions, then evaluate them with the "
-        "Hugging Face API model or the local model.",
+        "Hugging Face API model.",
         elem_id="app-subtitle",
     )
  
@@ -1111,11 +1107,7 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
  
         gr.Markdown(
             "### AI Portfolio Evaluation\n"
-            "**Auto** (default): tries the Hugging Face API model first and automatically "
-            "switches to the local model if the remote call fails for any reason (no token, "
-            "timeout, rate limit, API unavailable). It retries the remote model fresh on "
-            "every click.\n\n"
-            "**Local only / Hugging Face API only**: manual overrides — these do NOT fail over."
+            "Evaluation uses the Hugging Face API model — enter your token above."
         )
         # The evaluation controls are always on the page and just LOCKED (interactive=False)
         # until there is at least one suggestion. (Show/hide toggling of these controls
@@ -1125,18 +1117,18 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
         # ends it.
         eval_backend = gr.Radio(
             choices=[
-                "Auto (recommended — automatic failover)",
-                f"Local only ({LOCAL_MODEL})",
+##                "Auto (recommended — automatic failover)",
+##                f"Local only ({LOCAL_MODEL})",
                 f"Hugging Face API only ({REMOTE_MODEL})",
             ],
-            value="Auto (recommended — automatic failover)",
+            value=f"Hugging Face API only ({REMOTE_MODEL})",
             label="Run evaluation using",
             interactive=False,
         )
-        simulate_remote_failure = gr.Checkbox(
-            label="🧪 Simulate a remote-API failure (demo/testing only, forces Auto mode to fail over)",
-            value=False,
-        )
+##        simulate_remote_failure = gr.Checkbox(
+##            label="🧪 Simulate a remote-API failure (demo/testing only, forces Auto mode to fail over)",
+##            value=False,
+##        )
         eval_button = gr.Button(
             "🤖 Evaluate picks with AI (ends this round)",
             variant="primary",
@@ -1144,11 +1136,11 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
         )
         eval_output = gr.Markdown()
  
-        gr.Markdown(
-            "Use **Additional inputs** to tune the system message and generation settings "
-            "for both the API model and the locally executed model.",
-            elem_id="model-note",
-        )
+##        gr.Markdown(
+##            "Use **Additional inputs** to tune the system message and generation settings "
+##            "for both the API model and the locally executed model.",
+##            elem_id="model-note",
+##        )
  
     session_state = gr.State({})
  
@@ -1176,7 +1168,7 @@ with gr.Blocks(css=fancy_css, title=f"Stock Suggestor — {PRODUCT_NAME}") as de
  
     eval_button.click(
         fn=run_evaluation,
-        inputs=[session_state, eval_backend, simulate_remote_failure,
+        inputs=[session_state, eval_backend,  # simulate_remote_failure,
                 hf_token, system_message, max_tokens, temperature, top_p],
         outputs=[eval_output, mode_buttons_row, eval_button, eval_backend],
     )
